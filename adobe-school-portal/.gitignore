@@ -1,0 +1,43 @@
+# Adobe School Portal (Next.js + FastAPI)
+# Root /home/azureuser/.gitignore covers most patterns.
+
+# Secrets
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.local.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+api/.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+web/node_modules/
+web/.next/
+out/
+.vercel/
+*.tsbuildinfo
+
+# Runtime data
+data/
+pgdata/
+
+# Logs
+*.log
+
+# OS
+.DS_Store

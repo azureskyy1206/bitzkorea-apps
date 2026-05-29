@@ -1,0 +1,31 @@
+services:
+  api:
+    build: ./api
+    container_name: sales-support-api
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: .env
+    environment:
+      TZ: Asia/Seoul
+    ports: ["8000:8000"]
+    volumes:
+      - ./api:/app
+      - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    container_name: sales-support-web
+    ports: ["3000:3000"]
+    volumes:
+      - ./web:/app
+      - /app/node_modules
+    env_file: .env
+    environment:
+      TZ: Asia/Seoul
+      # 브라우저는 same-origin /api (Next rewrite). 공개 URL은 itc.bitzkorea.com
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-https://itc.bitzkorea.com}
+      # RSC/서버 fetch가 브라우저 리라이트 없이 API에 붙을 때(쿠키 전달) 컨테이너 DNS 사용
+      INTERNAL_API_URL: http://api:8000
+    restart: unless-stopped

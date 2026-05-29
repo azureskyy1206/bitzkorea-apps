@@ -1,0 +1,4 @@
+  File "<string>", line 8
+    vals=c.execute(text(select
+                       ^
+SyntaxError: '(' was never closed

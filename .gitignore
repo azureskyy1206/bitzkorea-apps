@@ -1,0 +1,97 @@
+# =============================================================================
+# Bitz Korea monorepo
+# Stack: Next.js 14 · FastAPI · PostgreSQL · Redis · Docker · Alembic · Vitest
+# Projects: app/ (Sales Support), adobe-school-portal/, infra/
+# =============================================================================
+
+# --- OS / shell / editor -----------------------------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.viminfo
+.bash_history
+.bash_logout
+.bashrc
+.lesshst
+.profile
+.Xauthority
+.sudo_as_admin_successful
+
+# Cursor / remote IDE (local machine state)
+.cursor/
+.cursor-server/
+
+# SSH keys & local git identity (never commit)
+.ssh/
+.gitconfig
+
+# --- Environment / secrets ---------------------------------------------------
+.env
+.env.*
+!.env.example
+!.env.*.example
+!.env.local.example
+
+# --- Python (FastAPI, Alembic, pytest) ---------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.Python
+.venv/
+venv/
+api/.venv/
+*.egg-info/
+*.egg
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+*.cover
+.hypothesis/
+
+# --- Node.js / Next.js / TypeScript / Tailwind -------------------------------
+node_modules/
+.next/
+out/
+.vercel/
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Docker / database volumes -----------------------------------------------
+pgdata/
+.docker/
+
+# --- Runtime data (uploads, exports, generated files) ------------------------
+# Sales Support
+app/data/
+app/data.empty/
+
+# Adobe School Portal
+adobe-school-portal/data/
+
+# Shared patterns inside data trees
+**/.editor-cache/
+**/ledger-edit-logs/
+**/daily-backups/
+
+# --- Large backups & DB dumps (sensitive / not source) -----------------------
+*.tar.gz
+*.sql
+
+# --- Logs --------------------------------------------------------------------
+*.log
+logs/
+
+# --- Local cache -------------------------------------------------------------
+.cache/
+.local/
