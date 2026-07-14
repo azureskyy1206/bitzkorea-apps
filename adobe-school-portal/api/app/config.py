@@ -4,7 +4,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(".env", "../.env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     database_url: str = "postgresql+asyncpg://portal:portal@localhost:5432/adobe_school_portal"
     redis_url: str = "redis://localhost:6379/0"
@@ -41,8 +45,23 @@ class Settings(BaseSettings):
     # TODO(Phase 3): EMAIL_MX_CHECK 플래그 연동
     email_mx_check: bool = False
 
+    # Microsoft 365 / Graph — 로그인 안내 메일 (Adobe@bitzkorea.com)
+    email_enabled: bool = False
+    azure_tenant_id: str = ""
+    azure_client_id: str = ""
+    azure_client_secret: str = ""
+    mail_from_address: str = ""
+    # Graph /users/{id}/sendMail — 이메일 대신 Azure AD 개체 ID(권장, 공용 사서함)
+    mail_from_user_id: str = ""
+    portal_public_url: str = "https://adobe.bitzkorea.com"
+
     login_lock_max_attempts: int = 5
     login_lock_ttl_seconds: int = 900  # 15분
+
+    # school.bitzkorea.com ↔ adobe SSO (서명 토큰 브릿지)
+    sso_shared_secret: str = ""  # school.bitzkorea.com 과 동일 값
+    sso_token_ttl_seconds: int = 120  # 서명 토큰 허용 시간
+    school_site_url: str = "https://school.bitzkorea.com"  # SSO 실패 시 돌아갈 곳
 
 
 @lru_cache
