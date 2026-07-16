@@ -704,6 +704,8 @@ Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>"
 		}
 
 		// 유일성 검사가 편집 대상 자기 자신을 제외하도록 mi_id 주입 ({mi_id} placeholder)
+		// (Task 2에서 확인: CI4는 {mi_id}를 치환하려면 그룹에 mi_id 규칙이 있어야 하고,
+		//  없으면 LogicException. UpdateMember/WithPass 두 그룹에 mi_id 규칙이 이미 추가돼 있다.)
 		$getData['mi_id'] = $id;
 
 		if($getData['mi_password']){
