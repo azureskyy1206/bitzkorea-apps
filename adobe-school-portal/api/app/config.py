@@ -60,6 +60,7 @@ class Settings(BaseSettings):
 
     # school.bitzkorea.com ↔ adobe SSO (서명 토큰 브릿지)
     sso_shared_secret: str = ""  # school.bitzkorea.com 과 동일 값
+    sso_admin_shared_secret: str = ""  # 관리자 SSO 전용 — 회원용(sso_shared_secret)과 반드시 다른 값
     sso_token_ttl_seconds: int = 120  # 서명 토큰 허용 시간
     school_site_url: str = "https://school.bitzkorea.com"  # SSO 실패 시 돌아갈 곳
 
