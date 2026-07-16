@@ -73,3 +73,74 @@ async def test_rename_blank_new_name(admin_client: AsyncClient):
     biz, _sid, _ids = await _make_school_with_contacts(admin_client, ["김철수"])
     resp = await admin_client.post(RENAME_URL, json={"biz_no": biz, "old_name": "김철수", "new_name": "   "})
     assert resp.status_code == 400
+
+
+async def _make_two_schools_same_biz(
+    admin_client: AsyncClient,
+    biz: str,
+    contacts_a: list[str],
+    contacts_b: list[str],
+):
+    """biz_no는 (biz_no, name) 복합 unique만 있어 동일 biz_no 학교가 여럿일 수 있다(정상 케이스).
+    이름이 다른 학교 2개를 같은 biz_no로 만들어 그 케이스를 재현한다.
+    """
+    suffix = uuid.uuid4().hex[:8]
+
+    created_a = await admin_client.post(
+        "/admin/schools", json={"name": f"리네임교A{suffix}", "biz_no": biz}
+    )
+    assert created_a.status_code == 201, created_a.text
+    school_a_id = created_a.json()["id"]
+
+    created_b = await admin_client.post(
+        "/admin/schools", json={"name": f"리네임교B{suffix}", "biz_no": biz}
+    )
+    assert created_b.status_code == 201, created_b.text
+    school_b_id = created_b.json()["id"]
+
+    async def _add_contacts(school_id: int, names: list[str]) -> dict[str, int]:
+        ids: dict[str, int] = {}
+        async with AsyncSessionLocal() as session:
+            await set_current_school_id(session, school_id)
+            for nm in names:
+                c = SchoolContact(school_id=school_id, name=nm)
+                session.add(c)
+                await session.flush()
+                ids[nm] = c.id
+            await session.commit()
+        return ids
+
+    ids_a = await _add_contacts(school_a_id, contacts_a)
+    ids_b = await _add_contacts(school_b_id, contacts_b)
+    return school_a_id, school_b_id, ids_a, ids_b
+
+
+async def test_rename_success_duplicate_biz_no_schools(admin_client: AsyncClient):
+    # 동일 biz_no 학교가 2개 있어도(예: 실 DB의 102-83-01443), 대상 이름 담당자가
+    # 한쪽 학교에만 있으면 scalar_one_or_none()의 MultipleResultsFound로 500이 나던 것이
+    # 정상적으로 200 rename 되어야 한다.
+    suffix = uuid.uuid4().hex[:8]
+    biz = f"102-83-{suffix}"
+    _sid_a, _sid_b, _ids_a, ids_b = await _make_two_schools_same_biz(
+        admin_client, biz, ["박민수"], ["김철수"]
+    )
+    resp = await admin_client.post(
+        RENAME_URL, json={"biz_no": biz, "old_name": "김철수", "new_name": "김영희"}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["contact_id"] == ids_b["김철수"]
+    assert body["name"] == "김영희"
+
+
+async def test_rename_ambiguous_duplicate_biz_no_schools(admin_client: AsyncClient):
+    # 동일 biz_no 학교 2개 양쪽에 같은 이름 담당자가 있으면(서로 다른 학교라도) 모호하므로
+    # 409로 거부해야 한다(500이 아님, 자동 병합도 하지 않음).
+    suffix = uuid.uuid4().hex[:8]
+    biz = f"102-83-{suffix}"
+    await _make_two_schools_same_biz(admin_client, biz, ["김철수"], ["김철수"])
+    resp = await admin_client.post(
+        RENAME_URL, json={"biz_no": biz, "old_name": "김철수", "new_name": "김영희"}
+    )
+    assert resp.status_code == 409
