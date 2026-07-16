@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.license_terms import TERM_META, is_valid_term, term_label
+from app.security.school_match import normalize_biz_no
 from app.services.sdl_export import sdl_contact_key
 from app.models import Account, AccountStatus, AuditLog, LicenseQuota, School, SchoolContact, SdlRegistration
 from app.schemas.admin import QuotaOut, SchoolOut
@@ -21,6 +22,8 @@ from app.schemas.admin_manage import (
     AdminAuditListResponse,
     AdminAuditOut,
     AdminContactQuotaOut,
+    AdminContactRenameIn,
+    AdminContactRenameOut,
     AdminContactUpdate,
     AdminOverviewOut,
     AdminSchoolContactOut,
@@ -904,6 +907,52 @@ async def update_school_contact(
         email=contact.email,
         quotas=[AdminContactQuotaOut(**q) for q in quotas_raw],
     )
+
+
+@router.post("/contacts/rename", response_model=AdminContactRenameOut)
+async def rename_contact_by_biz_name(
+    body: AdminContactRenameIn,
+    db: AsyncSession = Depends(get_db),
+):
+    new_norm = normalize_contact_name(body.new_name)
+    if not new_norm:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="새 담당자 이름을 입력하세요.")
+    old_norm = normalize_contact_name(body.old_name)
+    if not old_norm:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="기존 담당자 이름을 입력하세요.")
+
+    biz = normalize_biz_no(body.biz_no)
+    school = (await db.execute(select(School).where(School.biz_no == biz))).scalar_one_or_none()
+    if school is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="학교를 찾을 수 없습니다.")
+
+    # 이름은 정규화된 값으로 식별하므로(공백 등 dirty 데이터 대비),
+    # SQL 등호가 아니라 학교 내 전체 담당자를 불러와 normalize_contact_name으로 비교한다.
+    contacts = (await db.execute(
+        select(SchoolContact).where(SchoolContact.school_id == school.id)
+    )).scalars().all()
+
+    old_matches = [c for c in contacts if normalize_contact_name(c.name) == old_norm]
+    if len(old_matches) == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="담당자를 찾을 수 없습니다.")
+    if len(old_matches) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="같은 이름의 담당자가 여러 명이라 자동 반영할 수 없습니다.",
+        )
+
+    contact = old_matches[0]
+
+    if new_norm != old_norm:
+        conflict = any(normalize_contact_name(c.name) == new_norm for c in contacts)
+        if conflict:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="이미 같은 이름의 담당자가 있습니다.")
+
+    contact.name = new_norm
+    await db.commit()
+    await db.refresh(contact)
+    log.info("contact_renamed", school_id=school.id, contact_id=contact.id)
+    return AdminContactRenameOut(ok=True, contact_id=contact.id, name=contact.name)
 
 
 @router.get("/audit", response_model=AdminAuditListResponse)

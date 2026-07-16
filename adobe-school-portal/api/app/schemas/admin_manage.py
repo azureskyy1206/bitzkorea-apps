@@ -238,3 +238,15 @@ class NamedReconcileResponse(BaseModel):
     excel_not_in_portal: list[ReconcileEmailOut] = Field(default_factory=list)
     excel_school_unknown_rows: list[ReconcileEmailOut] = Field(default_factory=list)
     list_limit: int = 200
+
+
+class AdminContactRenameIn(BaseModel):
+    biz_no: str
+    old_name: str
+    new_name: str
+
+
+class AdminContactRenameOut(BaseModel):
+    ok: bool
+    contact_id: int
+    name: str
