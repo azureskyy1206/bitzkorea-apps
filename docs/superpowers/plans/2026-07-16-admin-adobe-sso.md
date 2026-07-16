@@ -414,17 +414,21 @@ final class AdobeSsoAdminTest extends CIUnitTestCase
     private const SECRET = 'admin-test-secret';
     private const URL    = 'https://adobe.example.com/backend-api/admin/auth/sso';
 
+    /**
+     * env()는 $_ENV를 가장 먼저 읽는다(system/Common.php:380). CI4의 DotEnv가
+     * .env 값을 $_ENV에 채우므로(system/Config/DotEnv.php:99), putenv()로는
+     * 실제 .env 값을 덮을 수 없다. 반드시 $_ENV를 직접 조작할 것.
+     */
     protected function setUp(): void
     {
         parent::setUp();
-        putenv('adobe.sso.admin_secret=' . self::SECRET);
-        putenv('adobe.sso.admin_url=' . self::URL);
+        $_ENV['adobe.sso.admin_secret'] = self::SECRET;
+        $_ENV['adobe.sso.admin_url']    = self::URL;
     }
 
     protected function tearDown(): void
     {
-        putenv('adobe.sso.admin_secret');
-        putenv('adobe.sso.admin_url');
+        unset($_ENV['adobe.sso.admin_secret'], $_ENV['adobe.sso.admin_url']);
         parent::tearDown();
     }
 
@@ -459,7 +463,7 @@ final class AdobeSsoAdminTest extends CIUnitTestCase
 
     public function testBuildForAdminFailsWhenNotConfigured(): void
     {
-        putenv('adobe.sso.admin_secret=');
+        $_ENV['adobe.sso.admin_secret'] = '';
 
         $result = (new \App\Libraries\AdobeSso())->buildForAdmin('testadmin');
 
@@ -718,6 +722,14 @@ print('admin sha256:', hashlib.sha256(get_settings().sso_admin_shared_secret.enc
 "
 ```
 Expected: 두 해시 앞 12자가 일치. (해시를 비교하므로 시크릿 원문은 노출되지 않는다.)
+
+`.env`에 실제 키가 생긴 뒤에도 Task 2의 단위 테스트가 유지되는지 반드시 다시 확인한다.
+(`env()`는 `$_ENV`를 먼저 읽으므로 테스트가 `.env` 값에 오염될 수 있다 — 이 단계가 그 회귀를 잡는다.)
+
+```bash
+cd /home/azureuser/school.bitzkorea.com && docker compose exec -T web sh -lc 'cd /var/www/html && php vendor/bin/phpunit --filter AdobeSsoAdminTest'
+```
+Expected: 여전히 `OK (3 tests, ...)`. 여기서 깨지면 테스트가 `.env`를 타고 있다는 뜻이니 멈추고 보고할 것.
 
 - [ ] **Step 6: 실제 브라우저로 E2E 검증**
 
