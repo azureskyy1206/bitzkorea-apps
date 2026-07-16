@@ -24,12 +24,37 @@ class AccessTokenCreate(BaseModel):
     expires_at: datetime | None = None
 
 
+class AccessTokenOut(BaseModel):
+    id: int
+    school_id: int
+    label: str | None
+    plain_token: str | None = None
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    created_at: datetime
+    is_active: bool
+
+
 class AccessTokenIssueResponse(BaseModel):
     id: int
     school_id: int
+    school_name: str | None = None
     plain_token: str
     label: str | None
     expires_at: datetime | None
+    remaining_without_token: int | None = None
+
+
+class BulkTokenIssueItem(BaseModel):
+    school_id: int
+    school_name: str
+    token_id: int
+    plain_token: str
+
+
+class BulkTokenIssueResponse(BaseModel):
+    issued: int
+    items: list[BulkTokenIssueItem]
 
 
 class QuotaSetRequest(BaseModel):

@@ -49,6 +49,24 @@ class AccountBulkDeleteResponse(BaseModel):
     items: list[AccountBulkDeleteItemResult]
 
 
+class AccountBulkDeleteByText(BaseModel):
+    text: str = Field(..., min_length=1, max_length=100_000)
+
+
+class AccountBulkDeleteByTextItemResult(BaseModel):
+    email: str
+    account_id: int | None = None
+    status: str  # deleted | skipped_removed | skipped_pending | not_found | invalid
+
+
+class AccountBulkDeleteByTextResponse(BaseModel):
+    deleted: int
+    skipped: int
+    not_found: list[str]
+    invalid: list[str]
+    items: list[AccountBulkDeleteByTextItemResult]
+
+
 class AccountUpdate(BaseModel):
     email: EmailStr
 

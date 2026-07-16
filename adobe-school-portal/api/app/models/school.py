@@ -21,3 +21,4 @@ class School(Base):
     license_quotas: Mapped[list["LicenseQuota"]] = relationship(back_populates="school")  # noqa: F821
     accounts: Mapped[list["Account"]] = relationship(back_populates="school")  # noqa: F821
     audit_logs: Mapped[list["AuditLog"]] = relationship(back_populates="school")  # noqa: F821
+    sdl_registrations: Mapped[list["SdlRegistration"]] = relationship(back_populates="school")  # noqa: F821

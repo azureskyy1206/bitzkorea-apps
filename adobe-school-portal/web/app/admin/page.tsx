@@ -8,6 +8,8 @@ import {
   TermOverview,
   adminApi,
 } from "@/lib/admin-api";
+import { checkAdminSession } from "@/lib/admin-auth";
+import AdminLoginForm from "@/components/admin-login-form";
 import { getStoredContractTerm, setStoredContractTerm } from "@/lib/contract-term";
 
 const OP_LABELS: Record<string, string> = {
@@ -17,9 +19,9 @@ const OP_LABELS: Record<string, string> = {
 };
 
 const SYNC_STATE_STYLES: Record<string, string> = {
-  pending: "bg-amber-100 text-amber-900",
-  processing: "bg-blue-100 text-blue-900",
-  failed: "bg-red-100 text-red-900",
+  pending: "app-badge bg-amber-100 text-amber-900 ring-amber-200/80",
+  processing: "app-badge bg-indigo-100 text-indigo-900 ring-indigo-200/80",
+  failed: "app-badge bg-red-100 text-red-900 ring-red-200/80",
 };
 
 const AUDIT_ACTION_LABELS: Record<string, string> = {
@@ -50,9 +52,9 @@ function StatCard({
 }) {
   const box = (
     <div
-      className={`rounded-xl border bg-white p-5 shadow-sm transition-colors ${
-        warn ? "border-amber-300 ring-1 ring-amber-200" : "border-slate-200"
-      } ${href ? "cursor-pointer hover:border-slate-300 hover:shadow" : ""}`}
+      className={`app-panel p-5 transition-colors ${
+        warn ? "border-amber-300/80 ring-1 ring-amber-200/80" : ""
+      } ${href ? "cursor-pointer hover:border-indigo-200/80 hover:shadow-md" : ""}`}
     >
       <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
       {hint ? <p className="mt-0.5 text-xs text-slate-400">{hint}</p> : null}
@@ -64,7 +66,7 @@ function StatCard({
   return href ? <Link href={href}>{box}</Link> : box;
 }
 
-export default function AdminDashboardPage() {
+function AdminDashboardPage() {
   const [data, setData] = useState<AdminOverview | null>(null);
   const [selectedTerm, setSelectedTerm] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -74,7 +76,10 @@ export default function AdminDashboardPage() {
       .overview()
       .then((overview) => {
         setData(overview);
-        setSelectedTerm(pickInitialTerm(overview.terms));
+        setSelectedTerm((prev) => {
+          if (prev && overview.terms.some((t) => t.contract_term === prev)) return prev;
+          return pickInitialTerm(overview.terms);
+        });
         setError(null);
       })
       .catch((err) => setError(err instanceof AdminApiError ? err.message : "불러오기 실패"));
@@ -134,7 +139,7 @@ export default function AdminDashboardPage() {
                     onClick={() => onSelectTerm(t.contract_term)}
                     className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                       selectedTerm === t.contract_term
-                        ? "bg-slate-900 text-white"
+                        ? "bg-indigo-600 text-white"
                         : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                     }`}
                   >
@@ -249,7 +254,7 @@ export default function AdminDashboardPage() {
                 전체 학교 목록 →
               </Link>
             </div>
-            <div className="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+            <div className="mt-4 overflow-hidden app-panel">
               <table className="w-full text-left text-sm">
                 <thead className="border-b border-slate-100 bg-slate-50 text-xs uppercase text-slate-500">
                   <tr>
@@ -353,14 +358,14 @@ export default function AdminDashboardPage() {
             </Link>
             <Link
               href="/admin/schools"
-              className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm hover:border-slate-300 transition-colors"
+              className="app-panel p-5 hover:border-slate-300 transition-colors"
             >
               <p className="font-semibold text-slate-900">학교 관리</p>
               <p className="mt-1 text-sm text-slate-600">검색·계정 관리</p>
             </Link>
             <Link
               href="/admin/audit"
-              className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm hover:border-slate-300 transition-colors"
+              className="app-panel p-5 hover:border-slate-300 transition-colors"
             >
               <p className="font-semibold text-slate-900">감사 로그</p>
               <p className="mt-1 text-sm text-slate-600">전체 학교 변경 이력</p>
@@ -393,7 +398,7 @@ function AttentionPanel({
   items: AttentionItem[];
 }) {
   return (
-    <div className="rounded-xl border border-slate-200 bg-white shadow-sm">
+    <div className="app-panel">
       <div className="border-b border-slate-100 px-4 py-3">
         <h3 className="font-medium text-slate-900">{title}</h3>
         <p className="text-xs text-slate-500">{items.length}건 표시 (최대 50건)</p>
@@ -435,4 +440,32 @@ function AttentionPanel({
       )}
     </div>
   );
+}
+
+export default function AdminPage() {
+  const [authed, setAuthed] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    checkAdminSession().then((ok) => {
+      if (!cancelled) setAuthed(ok);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (authed === null) {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-sm text-slate-500">
+        확인 중…
+      </div>
+    );
+  }
+
+  if (!authed) {
+    return <AdminLoginForm onSuccess={() => window.location.assign("/admin")} />;
+  }
+
+  return <AdminDashboardPage />;
 }

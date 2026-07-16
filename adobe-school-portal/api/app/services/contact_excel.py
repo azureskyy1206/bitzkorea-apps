@@ -192,10 +192,11 @@ def _load_list_purchaser_contacts(path: Path) -> list[ContactExcelRecord]:
     if not name_col:
         return []
     purchaser = _pick_column(list(df.columns), LIST_PURCHASER_NAME)
+    admin_col = _pick_column(list(df.columns), LIST_ADMIN_NAME)
     phone_col = _pick_column(list(df.columns), LIST_PURCHASER_PHONE)
     email_col = _pick_column(list(df.columns), LIST_PURCHASER_EMAIL)
     biz_col = _pick_column(list(df.columns), ("고유번호", "고유번호증"))
-    if not purchaser:
+    if not purchaser and not admin_col:
         return []
 
     out: list[ContactExcelRecord] = []
@@ -204,7 +205,12 @@ def _load_list_purchaser_contacts(path: Path) -> list[ContactExcelRecord]:
         raw_school = str(r.get(name_col, "")).strip()
         if not raw_school or raw_school == "nan":
             continue
-        contact_name = normalize_contact_name(str(r.get(purchaser, "")))
+        contact_name = (
+            normalize_contact_name(str(r.get(purchaser, ""))) if purchaser else None
+        )
+        if not contact_name and admin_col:
+            # 교육청 등 분할 행(…1/…2)은 구매자명 없이 행정담당만 있는 경우
+            contact_name = normalize_contact_name(str(r.get(admin_col, "")))
         if not contact_name:
             continue
         base = _school_base_key(raw_school)
@@ -246,6 +252,19 @@ def load_contact_directory() -> dict[tuple[str, str], ContactExcelRecord]:
     for path in list_files:
         for rec in _load_list_purchaser_contacts(path):
             merged[(rec.school_key, rec.contact_name)] = rec
+        for rec in _load_list_admin_license_contacts(path):
+            key = (rec.school_key, rec.contact_name)
+            prev = merged.get(key)
+            if prev is None:
+                merged[key] = rec
+            else:
+                merged[key] = ContactExcelRecord(
+                    school_key=rec.school_key,
+                    contact_name=rec.contact_name,
+                    phone=rec.phone or prev.phone,
+                    email=rec.email or prev.email,
+                    biz_no=rec.biz_no or prev.biz_no,
+                )
 
     for path in named_files:
         for rec in _load_named_mail_contacts(path):
@@ -265,11 +284,13 @@ def load_contact_directory() -> dict[tuple[str, str], ContactExcelRecord]:
 
 
 def _school_keys_match(school: School, school_key: str) -> bool:
-    base, _ = split_school_quota_suffix(school.name)
-    if base == school_key:
-        return True
+    """학교·엑셀 school_key 동일 단위만 (교육청 본청 ↔ 감사관 등 접두사 혼동 방지)."""
     from app.security.school_match import school_names_match_loose
 
+    school_base, _ = split_school_quota_suffix(school.name)
+    key_base, _ = split_school_quota_suffix(school_key)
+    if school_base == key_base:
+        return True
     return school_names_match_loose(school.name, school_key)
 
 

@@ -31,11 +31,18 @@ async def test_accounts_crud(client: AsyncClient, admin_headers: dict[str, str])
         },
     )
 
+    token_res = await client.post(
+        f"/admin/schools/{school_id}/tokens",
+        headers=admin_headers,
+        json={"label": "pytest"},
+    )
+    assert token_res.status_code == 201, token_res.text
+
     login = await client.post(
         "/auth/login",
-        json={"school_name": school_name, "biz_no": biz_no},
+        json={"access_token": token_res.json()["plain_token"]},
     )
-    assert login.status_code == 200
+    assert login.status_code == 200, login.text
     client.cookies.set("portal_session", login.cookies["portal_session"])
 
     create = await client.post("/accounts", json={"email": f"user1-{suffix}@test.school.kr"})
@@ -46,6 +53,15 @@ async def test_accounts_crud(client: AsyncClient, admin_headers: dict[str, str])
     lst = await client.get("/accounts")
     assert lst.status_code == 200
     assert lst.json()["total"] >= 1
+
+    filtered = await client.get("/accounts", params={"q": f"user1-{suffix}"})
+    assert filtered.status_code == 200
+    assert filtered.json()["total"] == 1
+    assert filtered.json()["items"][0]["email"] == f"user1-{suffix}@test.school.kr"
+
+    no_match = await client.get("/accounts", params={"q": "zzz-not-found-xyz"})
+    assert no_match.status_code == 200
+    assert no_match.json()["total"] == 0
 
     patch = await client.patch(
         f"/accounts/{acc_id}",
@@ -100,7 +116,18 @@ async def test_multi_contract_terms(client: AsyncClient, admin_headers: dict[str
         )
         assert r.status_code == 200, r.text
 
-    login = await client.post("/auth/login", json={"school_name": school_name, "biz_no": biz_no})
+    token_res = await client.post(
+        f"/admin/schools/{school_id}/tokens",
+        headers=admin_headers,
+        json={"label": "pytest"},
+    )
+    assert token_res.status_code == 201, token_res.text
+
+    login = await client.post(
+        "/auth/login",
+        json={"access_token": token_res.json()["plain_token"]},
+    )
+    assert login.status_code == 200, login.text
     client.cookies.set("portal_session", login.cookies["portal_session"])
 
     me = await client.get("/auth/me")

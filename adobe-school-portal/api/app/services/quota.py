@@ -17,17 +17,42 @@ async def list_school_contract_terms(
     contact_id: int | None = None,
 ) -> list[str]:
     from app.license_terms import sort_term_codes
+    from app.services.contact_service import count_school_contacts
 
-    q = select(LicenseQuota.contract_term).where(LicenseQuota.school_id == school_id)
     if contact_id is not None:
-        q = q.where(LicenseQuota.contact_id == contact_id)
-    else:
-        q = q.where(LicenseQuota.contact_id.is_(None))
+        n_contacts = await count_school_contacts(session, school_id)
+        result = await session.execute(
+            select(LicenseQuota.contract_term)
+            .where(
+                LicenseQuota.school_id == school_id,
+                LicenseQuota.contact_id == contact_id,
+                LicenseQuota.seats_total > 0,
+            )
+            .distinct()
+        )
+        codes = [row[0] for row in result.all() if row[0]]
+        if codes:
+            return sort_term_codes(codes)
+        if n_contacts > 1:
+            return []
+        result = await session.execute(
+            select(LicenseQuota.contract_term).where(
+                LicenseQuota.school_id == school_id,
+                LicenseQuota.contact_id.is_(None),
+                LicenseQuota.seats_total > 0,
+            )
+        )
+        codes = [row[0] for row in result.all() if row[0]]
+        return sort_term_codes(codes)
+
+    q = select(LicenseQuota.contract_term).where(
+        LicenseQuota.school_id == school_id,
+        LicenseQuota.contact_id.is_(None),
+    )
     result = await session.execute(q.distinct())
     codes = [row[0] for row in result.all() if row[0]]
     if codes:
         return sort_term_codes(codes)
-    # 담당자 좌석만 있고 학교 전체 quota 없을 때: 해당 학교의 모든 기간
     fallback = await session.execute(
         select(LicenseQuota.contract_term).where(LicenseQuota.school_id == school_id).distinct()
     )
@@ -84,24 +109,6 @@ async def get_or_create_quota(
     return quota
 
 
-async def contact_quota_terms(
-    session: AsyncSession,
-    school_id: int,
-    contact_id: int,
-) -> set[str]:
-    """담당자에게 할당된 quota가 있는 계약 기간."""
-    rows = (
-        await session.execute(
-            select(LicenseQuota.contract_term).where(
-                LicenseQuota.school_id == school_id,
-                LicenseQuota.contact_id == contact_id,
-                LicenseQuota.seats_total > 0,
-            )
-        )
-    ).all()
-    return {str(r[0]) for r in rows if r[0]}
-
-
 async def account_belongs_to_contact_scope(
     session: AsyncSession,
     school_id: int,
@@ -112,27 +119,12 @@ async def account_belongs_to_contact_scope(
 ) -> bool:
     if session_contact_id is None:
         return account_contact_id is None
-    sole = await sole_contact_id(session, school_id)
-    if sole is not None and sole == session_contact_id:
+    from app.services.contact_service import count_school_contacts
+
+    n_contacts = await count_school_contacts(session, school_id)
+    if n_contacts <= 1:
         return account_contact_id in (None, session_contact_id)
-    if account_contact_id == session_contact_id:
-        return True
-    if account_contact_id is None:
-        term = contract_term
-        if term is None:
-            return False
-        return term in await contact_quota_terms(session, school_id, session_contact_id)
-    return False
-
-
-async def sole_contact_id(session: AsyncSession, school_id: int) -> int | None:
-    """담당자가 정확히 1명일 때 contact_id."""
-    from app.services.contact_service import list_school_contacts
-
-    contacts = await list_school_contacts(session, school_id)
-    if len(contacts) == 1:
-        return contacts[0].id
-    return None
+    return account_contact_id == session_contact_id
 
 
 async def account_contact_scope(
@@ -143,19 +135,17 @@ async def account_contact_scope(
     """
     계정 contact_id 필터.
     - 담당자 1명: contact_id NULL(구 import) 계정 포함
-    - 담당자 여러 명: 해당 담당자 quota 기간의 NULL 계정 포함
+    - 담당자 여러 명: 본인 계정만 (기간·좌석 혼선 방지)
     """
     if contact_id is None:
         return Account.contact_id.is_(None)
-    sole = await sole_contact_id(session, school_id)
-    if sole is not None and sole == contact_id:
+
+    from app.services.contact_service import count_school_contacts
+
+    n_contacts = await count_school_contacts(session, school_id)
+    if n_contacts <= 1:
         return or_(Account.contact_id == contact_id, Account.contact_id.is_(None))
-    terms = await contact_quota_terms(session, school_id, contact_id)
-    if terms:
-        return or_(
-            Account.contact_id == contact_id,
-            and_(Account.contact_id.is_(None), Account.contract_term.in_(terms)),
-        )
+
     return Account.contact_id == contact_id
 
 

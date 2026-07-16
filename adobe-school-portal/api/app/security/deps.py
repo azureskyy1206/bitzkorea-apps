@@ -135,7 +135,3 @@ async def require_admin_auth(
             detail="ADMIN_PASSWORD 또는 ADMIN_API_KEY가 설정되지 않았습니다.",
         )
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="관리자 로그인이 필요합니다.")
-
-
-# 하위 호환
-require_admin_api_key = require_admin_auth

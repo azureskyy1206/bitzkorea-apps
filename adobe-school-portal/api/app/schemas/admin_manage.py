@@ -117,6 +117,7 @@ class SchoolListItem(BaseModel):
     contact_id: int | None = None
     name: str
     biz_no: str
+    sdl: bool = False
     contact_name: str | None = None
     contact_phone: str | None = None
     contact_email: str | None = None
@@ -135,11 +136,34 @@ class SchoolListResponse(BaseModel):
     limit: int
 
 
+class SchoolMailSelectionItem(BaseModel):
+    school_id: int
+    contact_id: int | None = None
+    contact_name: str | None = None
+    contact_phone: str | None = None
+    contact_email: str | None = None
+
+
+class SchoolMailSelectionResponse(BaseModel):
+    items: list[SchoolMailSelectionItem]
+    total: int
+
+
 class AdminContactQuotaOut(BaseModel):
     contract_term: str
     label: str
     seats_total: int
     seats_used: int
+
+
+class AdminContactUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    phone: str | None = Field(default=None, max_length=40)
+    email: str | None = Field(default=None, max_length=320)
+
+
+class SchoolProfileUpdate(BaseModel):
+    contact_email: str | None = Field(default=None, max_length=320)
 
 
 class AdminSchoolContactOut(BaseModel):

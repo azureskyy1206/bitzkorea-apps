@@ -27,6 +27,7 @@ export async function adminFetch<T>(path: string, init?: RequestInit): Promise<T
   const res = await fetch(`/api/admin/${path.replace(/^\//, "")}`, {
     ...init,
     credentials: "include",
+    cache: "no-store",
     headers: {
       ...(init?.headers || {}),
     },
@@ -158,7 +159,40 @@ export type QuotaRow = {
 export type AdminSchoolContact = {
   id: number;
   name: string;
+  phone?: string | null;
+  email?: string | null;
   quotas: { contract_term: string; label: string; seats_total: number; seats_used: number }[];
+};
+
+export type AccessTokenRow = {
+  id: number;
+  school_id: number;
+  label: string | null;
+  plain_token: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+  created_at: string;
+  is_active: boolean;
+};
+
+export type AccessTokenIssueResult = {
+  id: number;
+  school_id: number;
+  school_name?: string | null;
+  plain_token: string;
+  label: string | null;
+  expires_at: string | null;
+  remaining_without_token?: number | null;
+};
+
+export type BulkTokenIssueResult = {
+  issued: number;
+  items: {
+    school_id: number;
+    school_name: string;
+    token_id: number;
+    plain_token: string;
+  }[];
 };
 
 export type PortalAccount = {
@@ -192,6 +226,14 @@ export type PortalAccountBulkDeleteResult = {
   items: { account_id: number; email: string | null; status: string }[];
 };
 
+export type PortalAccountBulkDeleteByTextResult = {
+  deleted: number;
+  skipped: number;
+  not_found: string[];
+  invalid: string[];
+  items: { email: string; account_id: number | null; status: string }[];
+};
+
 export type SchoolAllocationTerm = {
   contract_term: string;
   label: string;
@@ -204,6 +246,7 @@ export type SchoolListItem = {
   contact_id: number | null;
   name: string;
   biz_no: string;
+  sdl: boolean;
   contact_name: string | null;
   contact_phone: string | null;
   contact_email: string | null;
@@ -218,6 +261,19 @@ export type SchoolList = {
   total: number;
   page: number;
   limit: number;
+};
+
+export type SchoolMailSelectionItem = {
+  school_id: number;
+  contact_id: number | null;
+  contact_name?: string | null;
+  contact_phone?: string | null;
+  contact_email?: string | null;
+};
+
+export type SchoolMailSelection = {
+  items: SchoolMailSelectionItem[];
+  total: number;
 };
 
 export type SchoolDetail = {
@@ -241,6 +297,57 @@ export type ImportResult = {
   updated_quota: number;
   created_accounts: number;
   tokens_csv_path: string | null;
+  message: string;
+};
+
+export type SdlRegistration = {
+  id: number;
+  school_id: number;
+  school_name: string;
+  school_biz_no: string;
+  contact_name: string | null;
+  contact_phone: string | null;
+  contact_email: string | null;
+  registered_ip: string;
+  purchase_qty: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type SdlList = {
+  items: SdlRegistration[];
+  total: number;
+  page: number;
+  limit: number;
+};
+
+export type SdlGroupedIp = {
+  id: number;
+  ip: string;
+};
+
+export type SdlGroupedSchool = {
+  school_id: number;
+  school_name: string;
+  total_qty: number;
+  ips: SdlGroupedIp[];
+};
+
+export type SdlGroupedList = {
+  items: SdlGroupedSchool[];
+  total: number;
+  page: number;
+  limit: number;
+};
+
+export type SdlSortBy = "school_name" | "total_qty";
+export type SdlSortOrder = "asc" | "desc";
+
+export type SdlImportResult = {
+  created: number;
+  updated: number;
+  skipped: number;
+  schools_created: number;
   message: string;
 };
 
@@ -271,6 +378,42 @@ export type NamedReconcileResult = {
   list_limit: number;
 };
 
+export type EmailConfigStatus = {
+  configured: boolean;
+  mail_from: string | null;
+  portal_url: string;
+};
+
+export type EmailTemplate = {
+  slug: string;
+  name: string;
+  subject: string;
+  body_html: string;
+  body_text: string;
+  updated_at: string;
+  placeholders: string;
+};
+
+export type SendLoginGuideItem = {
+  school_id: number;
+  contact_id?: number | null;
+};
+
+export type SendLoginGuideResult = {
+  sent: number;
+  skipped: number;
+  failed: number;
+  rows: {
+    school_id: number;
+    school_name: string;
+    contact_id: number | null;
+    contact_name: string | null;
+    email: string | null;
+    status: string;
+    detail?: string | null;
+  }[];
+};
+
 export const CONTRACT_TERMS = [
   { code: "CY25-H2", label: "2025년 하반기" },
   { code: "CY26-H1", label: "2026년 상반기" },
@@ -285,13 +428,25 @@ export const adminApi = {
   schools: (
     page = 1,
     q = "",
-    opts?: { contractTerms?: string[]; registration?: string },
+    opts?: { contractTerms?: string[]; registration?: string; sdl?: boolean },
   ) => {
     const sp = new URLSearchParams({ page: String(page), limit: "30" });
     if (q) sp.set("q", q);
     if (opts?.contractTerms?.length) sp.set("contract_terms", opts.contractTerms.join(","));
     if (opts?.registration) sp.set("registration", opts.registration);
+    if (opts?.sdl != null) sp.set("sdl", opts.sdl ? "true" : "false");
     return adminFetch<SchoolList>(`schools?${sp.toString()}`);
+  },
+  schoolsMailSelection: (
+    q = "",
+    opts?: { contractTerms?: string[]; registration?: string; sdl?: boolean },
+  ) => {
+    const sp = new URLSearchParams();
+    if (q) sp.set("q", q);
+    if (opts?.contractTerms?.length) sp.set("contract_terms", opts.contractTerms.join(","));
+    if (opts?.registration) sp.set("registration", opts.registration);
+    if (opts?.sdl != null) sp.set("sdl", opts.sdl ? "true" : "false");
+    return adminFetch<SchoolMailSelection>(`schools/mail-selection?${sp.toString()}`);
   },
   school: (id: number) => adminFetch<SchoolDetail>(`schools/${id}`),
   schoolAccounts: (
@@ -364,6 +519,23 @@ export const adminApi = {
       },
     );
   },
+  deleteSchoolAccountsBulkByText: (
+    schoolId: number,
+    text: string,
+    contractTerm: string,
+    contactId?: number,
+  ) => {
+    const sp = new URLSearchParams({ contract_term: contractTerm });
+    if (contactId != null) sp.set("contact_id", String(contactId));
+    return adminFetch<PortalAccountBulkDeleteByTextResult>(
+      `schools/${schoolId}/accounts/bulk-delete-by-text?${sp}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      },
+    );
+  },
   setQuota: (
     schoolId: number,
     body: { product_profile_id: string; seats_total: number; contract_term: string },
@@ -394,6 +566,120 @@ export const adminApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  listSchoolTokens: (schoolId: number) => adminFetch<AccessTokenRow[]>(`schools/${schoolId}/tokens`),
+  issueSchoolToken: (schoolId: number, label?: string) =>
+    adminFetch<AccessTokenIssueResult>(`schools/${schoolId}/tokens`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label: label || null }),
+    }),
+  reissueSchoolToken: (schoolId: number) =>
+    adminFetch<AccessTokenIssueResult>(`schools/${schoolId}/tokens/reissue`, {
+      method: "POST",
+    }),
+  revokeToken: (tokenId: number) => adminFetch<void>(`tokens/${tokenId}`, { method: "DELETE" }),
+  issueMissingTokens: () =>
+    adminFetch<BulkTokenIssueResult>("tokens/issue-missing", { method: "POST" }),
+  issueAllTokens: (replaceExisting = true) =>
+    adminFetch<BulkTokenIssueResult>(
+      `tokens/issue-all?replace_existing=${replaceExisting ? "true" : "false"}`,
+      { method: "POST" },
+    ),
+  updateSchoolContact: (
+    schoolId: number,
+    contactId: number,
+    body: { name?: string; phone?: string | null; email?: string | null },
+  ) =>
+    adminFetch<AdminSchoolContact>(`schools/${schoolId}/contacts/${contactId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  updateSchoolProfile: (schoolId: number, body: { contact_email?: string | null }) =>
+    adminFetch<{ id: number; name: string; biz_no: string; contact_email: string | null }>(
+      `schools/${schoolId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  sdlList: (page = 1, q = "") => {
+    const sp = new URLSearchParams({ page: String(page), limit: "50" });
+    if (q) sp.set("q", q);
+    return adminFetch<SdlList>(`sdl?${sp.toString()}`);
+  },
+  sdlGroupedList: (
+    page = 1,
+    q = "",
+    opts?: { sortBy?: SdlSortBy; sortOrder?: SdlSortOrder },
+  ) => {
+    const sp = new URLSearchParams({ page: String(page), limit: "50" });
+    if (q) sp.set("q", q);
+    if (opts?.sortBy) sp.set("sort_by", opts.sortBy);
+    if (opts?.sortOrder) sp.set("sort_order", opts.sortOrder);
+    return adminFetch<SdlGroupedList>(`sdl/grouped?${sp.toString()}`);
+  },
+  createSdl: (body: {
+    school_id: number;
+    registered_ip: string;
+    purchase_qty?: number;
+    contact_name?: string | null;
+    contact_phone?: string | null;
+    contact_email?: string | null;
+  }) =>
+    adminFetch<SdlRegistration>("sdl", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  updateSdl: (
+    id: number,
+    body: {
+      registered_ip?: string;
+      purchase_qty?: number;
+      contact_name?: string | null;
+      contact_phone?: string | null;
+      contact_email?: string | null;
+    },
+  ) =>
+    adminFetch<SdlRegistration>(`sdl/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteSdl: (id: number) => adminFetch<void>(`sdl/${id}`, { method: "DELETE" }),
+  importSdlExcel: (form: FormData) =>
+    adminFetch<SdlImportResult>("import/sdl", { method: "POST", body: form }),
+  emailStatus: () => adminFetch<EmailConfigStatus>("email/status"),
+  getEmailTemplate: (slug: string) => adminFetch<EmailTemplate>(`email/templates/${slug}`),
+  updateEmailTemplate: (
+    slug: string,
+    body: { name?: string; subject: string; body_html: string; body_text: string },
+  ) =>
+    adminFetch<EmailTemplate>(`email/templates/${slug}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  previewEmailTemplate: (
+    slug: string,
+    sample: { school_name: string; contact_name: string; access_token: string },
+  ) =>
+    adminFetch<{ subject: string; body_html: string; body_text: string }>(
+      `email/templates/${slug}/preview`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sample),
+      },
+    ),
+  sendLoginGuide: (items: SendLoginGuideItem[]) =>
+    adminFetch<SendLoginGuideResult>("email/send-login-guide", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ items, template_slug: "login_guide" }),
+    }),
 };
 
 export async function downloadUsageAccountsExcel(contractTerm?: string): Promise<void> {
@@ -404,12 +690,55 @@ export async function downloadUsageAccountsExcel(contractTerm?: string): Promise
   }
   const blob = await res.blob();
   const disposition = res.headers.get("Content-Disposition") ?? "";
-  const match = disposition.match(/filename="?([^";]+)"?/);
-  const filename = match?.[1] ?? (contractTerm ? `사용계정목록_${contractTerm}.xlsx` : "사용계정목록.xlsx");
+  const filename = parseContentDispositionFilename(
+    disposition,
+    contractTerm ? `사용계정목록_${contractTerm}.xlsx` : "사용계정목록.xlsx",
+  );
+  triggerBlobDownload(blob, filename);
+}
+
+export type ExcelTemplateKey = "master-list" | "named-mail" | "usage-accounts" | "sdl";
+
+function parseContentDispositionFilename(disposition: string, fallback: string): string {
+  const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/);
+  if (utf8?.[1]) return decodeURIComponent(utf8[1]);
+  const basic = disposition.match(/filename="?([^";]+)"?/);
+  return basic?.[1] ?? fallback;
+}
+
+function triggerBlobDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+export async function downloadExcelTemplate(key: ExcelTemplateKey): Promise<void> {
+  const res = await fetch(`/api/admin/excel-templates/${key}`, { credentials: "include" });
+  if (!res.ok) {
+    throw new AdminApiError(await parseError(res), res.status);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const fallbacks: Record<ExcelTemplateKey, string> = {
+    "master-list": "최종리스트_양식.xlsx",
+    "named-mail": "Named메일_양식.xlsx",
+    "usage-accounts": "사용계정목록_양식.xlsx",
+    sdl: "SDL_양식.xlsx",
+  };
+  triggerBlobDownload(blob, parseContentDispositionFilename(disposition, fallbacks[key]));
+}
+
+export async function downloadSdlExcel(q = ""): Promise<void> {
+  const sp = q ? `?q=${encodeURIComponent(q)}` : "";
+  const res = await fetch(`/api/admin/sdl/export${sp}`, { credentials: "include" });
+  if (!res.ok) {
+    throw new AdminApiError(await parseError(res), res.status);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const filename = parseContentDispositionFilename(disposition, "SDL_등록목록.xlsx");
+  triggerBlobDownload(blob, filename);
 }

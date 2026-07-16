@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { ApiError, ContactOption, api } from "@/lib/api";
-import { formatContactLicenseTerms } from "@/lib/contact-terms";
 
 export default function SelectContactPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const switchMode = searchParams.get("switch") === "1";
   const [contacts, setContacts] = useState<ContactOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -16,7 +17,7 @@ export default function SelectContactPage() {
     void (async () => {
       try {
         const me = await api.me();
-        if (!me.needs_contact_selection) {
+        if (!switchMode && !me.needs_contact_selection) {
           router.replace("/dashboard");
           return;
         }
@@ -36,7 +37,7 @@ export default function SelectContactPage() {
         setLoading(false);
       }
     })();
-  }, [router]);
+  }, [router, switchMode]);
 
   async function onSelect(contactId: number) {
     setSubmitting(true);
@@ -60,36 +61,50 @@ export default function SelectContactPage() {
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-10">
-      <div className="w-full max-w-lg rounded-xl border border-slate-200 bg-white p-8 shadow-sm">
+    <main className="flex min-h-screen items-center justify-center px-4 py-10">
+      <div className="w-full max-w-lg app-panel p-8">
         <h1 className="text-xl font-bold text-slate-900">담당자 선택</h1>
         <p className="mt-2 text-sm text-slate-600">
-          이 학교에는 여러 담당자가 등록되어 있습니다. 본인 담당 구간을 선택하면 해당 수량만
-          조회·관리할 수 있습니다.
+          이 학교에는 담당자가 여러 명입니다. 본인 이름을 선택하면 해당 기간·수량의 계정만
+          조회·관리할 수 있습니다. 상·하반기를 따로 구매한 경우 담당자별로 나뉘어 표시됩니다.
         </p>
         {error ? <p className="mt-4 text-sm text-red-600">{error}</p> : null}
         <ul className="mt-6 space-y-3">
           {contacts.map((c) => {
-            const termText = formatContactLicenseTerms(c.quotas);
-            const totalSeats = c.quotas.reduce((s, q) => s + q.seats_total, 0);
-            const usedSeats = c.quotas.reduce((s, q) => s + q.seats_used, 0);
+            const withSeats = c.quotas.filter((q) => q.seats_total > 0);
+            const totalSeats = withSeats.reduce((s, q) => s + q.seats_total, 0);
+            const usedSeats = withSeats.reduce((s, q) => s + q.seats_used, 0);
+            const hasAllocation = totalSeats > 0;
             return (
               <li key={c.id}>
                 <button
                   type="button"
-                  disabled={submitting}
+                  disabled={submitting || !hasAllocation}
                   onClick={() => void onSelect(c.id)}
-                  className="w-full rounded-lg border border-slate-200 px-4 py-4 text-left hover:border-slate-400 hover:bg-slate-50 disabled:opacity-60"
+                  className="w-full rounded-lg border border-slate-200 px-4 py-4 text-left hover:border-slate-400 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <span className="font-semibold text-slate-900">
-                    {c.name}
-                    {termText ? (
-                      <span className="ml-2 font-medium text-indigo-700">{termText}</span>
-                    ) : null}
-                  </span>
-                  <span className="mt-1 block text-sm text-slate-600">
-                    할당 {totalSeats > 0 ? `${usedSeats} / ${totalSeats} 계정` : "좌석 정보 없음"}
-                  </span>
+                  <span className="font-semibold text-slate-900">{c.name}</span>
+                  {withSeats.length > 0 ? (
+                    <ul className="mt-2 space-y-1">
+                      {withSeats.map((q) => (
+                        <li key={q.contract_term} className="text-sm text-slate-700">
+                          <span className="font-medium text-indigo-800">{q.label}</span>
+                          <span className="ml-2 text-slate-600">
+                            {q.seats_used} / {q.seats_total} 계정
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <span className="mt-1 block text-sm text-slate-400">
+                      등록된 라이선스 할당 없음
+                    </span>
+                  )}
+                  {hasAllocation ? (
+                    <span className="mt-2 block text-xs text-slate-500">
+                      합계 {usedSeats} / {totalSeats} 계정
+                    </span>
+                  ) : null}
                 </button>
               </li>
             );

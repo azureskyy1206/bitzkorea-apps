@@ -180,7 +180,8 @@ async def build_usage_accounts_rows(
         term_used, term_total = term_alloc_lines.get((school_id, cid, term), (0, 0))
         sum_used, sum_total = contact_totals.get((school_id, cid), (0, 0))
         emails = emails_by_key.get((school_id, cid, term), [])
-        slots = int(quota.seats_total)
+        # 할당량보다 등록 계정이 많을 때(동일 사업자번호·다른 학교급 혼재 등) 누락 방지
+        slots = max(int(quota.seats_total), len(emails))
         term_pair = _format_allocation_pair(term_used, term_total)
         term_reg = _registration_label(term_used)
         sum_pair = _format_allocation_pair(sum_used, sum_total)

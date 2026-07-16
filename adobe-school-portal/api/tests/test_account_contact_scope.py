@@ -53,7 +53,20 @@ async def test_multi_contact_orphan_by_term() -> None:
         await session.commit()
 
         n = await count_registered_accounts(session, school.id, "CY25-H2", contact_id=c1.id)
-        assert n == 1
+        assert n == 0
+
+        session.add(
+            Account(
+                school_id=school.id,
+                contact_id=c1.id,
+                contract_term="CY25-H2",
+                email=f"b-{suffix}@school.kr",
+                status=AccountStatus.active,
+            )
+        )
+        await session.commit()
+        n2 = await count_registered_accounts(session, school.id, "CY25-H2", contact_id=c1.id)
+        assert n2 == 1
 
         await session.rollback()
 

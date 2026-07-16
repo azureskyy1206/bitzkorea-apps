@@ -12,13 +12,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.license_terms import TERM_META
 from app.models import Account, LicenseQuota, NamedTermKpi, School
 from app.security.school_match import normalize_school_name
-from app.services.excel_import import EMAIL_RE, _header_row
+from app.services.excel_import import EMAIL_RE, _header_row, load_school_master
 from app.services.quota_aggregate import sum_term_seats_deduped
 
 DATA_IN_CANDIDATES = (
     Path("/data/in"),
     Path(__file__).resolve().parents[2] / "data" / "in",
 )
+
+TERM_LIST_PATTERNS: dict[str, tuple[str, ...]] = {
+    "CY25-H2": (
+        "*CY25*최종*리스트*.xlsx",
+        "*CY25*하반*최종*.xlsx",
+        "#####CY25*최종*리스트*.xlsx",
+    ),
+    "CY26-H1": (
+        "*CY26*최종*리스트*.xlsx",
+        "*CY26*상반*최종*.xlsx",
+        "#####CY26*최종*리스트*.xlsx",
+    ),
+}
 
 TERM_MAIL_PATTERNS: dict[str, tuple[str, ...]] = {
     "CY25-H2": (
@@ -47,24 +60,34 @@ class NamedKpiSnapshot:
     source_file: str | None = None
 
 
+def _non_production_school_filters():
+    """테스트·관리자 계정용 더미 학교 제외."""
+    return (
+        not_(School.name.like("관리테스트%")),
+        not_(School.name.like("다차수%")),
+        not_(School.name.like("관리자계정학교%")),
+        not_(School.biz_no.like("000-00-%")),
+    )
+
+
 def _purchase_quota_filters(contract_term: str):
     """구매(quota) 학교 — 테스트·임시 학교 제외."""
     return and_(
         LicenseQuota.contract_term == contract_term,
         LicenseQuota.seats_total > 0,
-        not_(School.name.like("관리테스트%")),
-        not_(School.name.like("다차수%")),
-        not_(School.biz_no.like("000-00-%")),
+        *_non_production_school_filters(),
     )
 
 
 def _account_term_filters(contract_term: str):
     return and_(
         Account.contract_term == contract_term,
-        not_(School.name.like("관리테스트%")),
-        not_(School.name.like("다차수%")),
-        not_(School.biz_no.like("000-00-%")),
+        *_non_production_school_filters(),
     )
+
+
+def _portal_quota_school_filters() -> list:
+    return [LicenseQuota.seats_total > 0, *_non_production_school_filters()]
 
 
 async def compute_named_kpis_from_db(
@@ -100,16 +123,23 @@ async def compute_named_kpis_from_db(
     ).one()
     purchase_schools = int(purchase_row[0] or 0)
     schools_with_accounts = int(purchase_row[1] or 0)
-    total_application, _ = await sum_term_seats_deduped(
-        session,
-        contract_term,
-        school_filters=[
-            LicenseQuota.seats_total > 0,
-            not_(School.name.like("관리테스트%")),
-            not_(School.name.like("다차수%")),
-            not_(School.biz_no.like("000-00-%")),
-        ],
-    )
+    list_path = find_final_list_path(contract_term)
+    source_file: str | None = None
+    total_application: int | None = None
+    if list_path is not None and list_path.is_file():
+        try:
+            master = load_school_master(list_path)
+            if "seats" in master.columns and not master.empty:
+                total_application = int(master["seats"].sum())
+                source_file = list_path.name
+        except ValueError:
+            pass
+    if total_application is None:
+        total_application, _ = await sum_term_seats_deduped(
+            session,
+            contract_term,
+            school_filters=_portal_quota_school_filters(),
+        )
 
     allocated_qty = int(
         (
@@ -139,7 +169,7 @@ async def compute_named_kpis_from_db(
         allocated_schools=allocated_schools,
         unallocated_schools=unallocated_schools,
         source="portal_db",
-        source_file=None,
+        source_file=source_file,
     )
 
 
@@ -214,22 +244,6 @@ async def refresh_named_kpis_for_term(
     return snapshot
 
 
-async def refresh_named_kpis_if_stale(
-    session: AsyncSession,
-    contract_term: str,
-) -> NamedKpiSnapshot | None:
-    """디스크 Named 메일이 DB 스냅샷보다 새로우면 재집계."""
-    path = find_named_mail_path(contract_term)
-    if path is None:
-        return await get_stored_named_kpis(session, contract_term)
-
-    mtime = path.stat().st_mtime
-    row = await session.get(NamedTermKpi, contract_term)
-    if row is not None and row.source_path_mtime is not None and row.source_path_mtime >= mtime:
-        return _row_to_snapshot(row)
-    return await refresh_named_kpis_for_term(session, contract_term, excel_path=path)
-
-
 async def refresh_all_named_kpis_from_disk(session: AsyncSession) -> list[str]:
     """모든 계약 기간 — /data/in Named 메일 기준으로 KPI 갱신."""
     updated: list[str] = []
@@ -246,33 +260,18 @@ async def refresh_all_named_kpis_from_disk(session: AsyncSession) -> list[str]:
     return updated
 
 
-_excel_kpi_cache: dict[str, tuple[float, NamedKpiSnapshot]] = {}
-
-
-def compute_named_kpis_from_excel_cached(path: Path) -> NamedKpiSnapshot:
-    """Named 메일 xlsx KPI — 파일 mtime 기준 메모리 캐시 (대시보드 응답 속도)."""
-    key = str(path.resolve())
-    mtime = path.stat().st_mtime
-    cached = _excel_kpi_cache.get(key)
-    if cached is not None and cached[0] == mtime:
-        return cached[1]
-    snapshot = compute_named_kpis_from_excel(path)
-    _excel_kpi_cache[key] = (mtime, snapshot)
-    return snapshot
-
-
 async def resolve_named_kpis_for_dashboard(
     session: AsyncSession,
     contract_term: str,
 ) -> NamedKpiSnapshot | None:
     """
-    관리자 대시보드 공동구매 KPI — DB 스냅샷 우선 (요청 시 엑셀 파싱 없음).
-    캐시가 없으면 한 번 갱신 후 저장한다.
+    관리자 대시보드 공동구매 KPI — 포털 DB 실시간 집계(매 요청 반영).
     """
-    stored = await get_stored_named_kpis(session, contract_term)
-    if stored is not None:
-        return stored
-    return await refresh_named_kpis_for_term(session, contract_term)
+    snapshot = await compute_named_kpis_from_db(session, contract_term)
+    if snapshot is None:
+        return None
+    await upsert_named_kpis(session, contract_term, snapshot)
+    return snapshot
 
 
 # --- 엑셀 집계: analyze 스크립트·Import 검증용 ---
@@ -284,6 +283,35 @@ def _data_in_roots() -> list[Path]:
         if p.is_dir() and p not in roots:
             roots.append(p)
     return roots
+
+
+def find_final_list_path(contract_term: str) -> Path | None:
+    """계약 기간별 최종 리스트 xlsx (총 신청수량 기준)."""
+    patterns = TERM_LIST_PATTERNS.get(contract_term, ("*최종*리스트*.xlsx",))
+    hits: list[Path] = []
+    for root in _data_in_roots():
+        for pattern in patterns:
+            hits.extend(root.glob(pattern))
+            sub = root / "새 폴더"
+            if sub.is_dir():
+                hits.extend(sub.glob(pattern))
+    if not hits:
+        from app.services.contact_excel import discover_contact_excel_files
+
+        _, list_files = discover_contact_excel_files()
+        term_year = contract_term.split("-")[0].lower()
+        for p in list_files:
+            if term_year in p.name.lower().replace(" ", ""):
+                hits.append(p)
+    if not hits:
+        return None
+    hits = sorted(set(hits), key=lambda p: p.stat().st_mtime, reverse=True)
+    term_tag = contract_term.replace("-", "").lower()
+    for p in hits:
+        name = p.name.lower()
+        if term_tag[:4] in name or contract_term.split("-")[0].lower() in name:
+            return p
+    return hits[0]
 
 
 def find_named_mail_path(contract_term: str) -> Path | None:

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import AdminSchoolAccountsPanel from "@/components/admin-school-accounts";
+import AdminSchoolAccessPanel from "@/components/admin-school-access";
 import { AdminApiError, CONTRACT_TERMS, SchoolDetail, adminApi } from "@/lib/admin-api";
 import {
   ALLOCATION_PAIR_HINT,
@@ -61,7 +62,7 @@ export default function AdminSchoolDetailPage() {
       <h1 className="mt-4 text-2xl font-bold text-slate-900">{detail.school.name}</h1>
       <p className="font-mono text-sm text-slate-600">{detail.school.biz_no}</p>
 
-      <section className="mt-8 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+      <section className="mt-8 app-panel p-5">
         <h2 className="font-semibold text-slate-900">라이선스·계정 현황</h2>
         <ul className="mt-4 space-y-3">
           {CONTRACT_TERMS.map((t) => {
@@ -102,6 +103,14 @@ export default function AdminSchoolDetailPage() {
           </p>
         ) : null}
       </section>
+
+      <AdminSchoolAccessPanel
+        schoolId={id}
+        schoolName={detail.school.name}
+        schoolContactEmail={detail.school.contact_email}
+        contacts={detail.contacts ?? []}
+        onUpdated={() => void load()}
+      />
 
       <AdminSchoolAccountsPanel
         schoolId={id}

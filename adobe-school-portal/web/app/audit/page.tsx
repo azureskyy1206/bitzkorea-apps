@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import PortalNav from "@/components/portal-nav";
 import { ApiError, AuditEntry, MeResponse, api } from "@/lib/api";
+import { mobileMain } from "@/lib/ui-classes";
 
 const ACTION_LABELS: Record<string, string> = {
   "account.create": "계정 등록",
@@ -46,9 +47,9 @@ export default function AuditPage() {
   }, [load]);
 
   return (
-    <div className="min-h-screen bg-slate-50">
+    <div className={`min-h-screen ${mobileMain}`}>
       <PortalNav schoolName={me?.school.name} />
-      <main className="mx-auto max-w-3xl px-4 py-6">
+      <main className="mx-auto max-w-3xl px-3 py-5 sm:px-4 sm:py-6">
         <h1 className="text-xl font-bold text-slate-900">감사 로그</h1>
         <p className="mt-1 text-sm text-slate-600">본교에서 수행한 계정 변경 이력입니다.</p>
 

@@ -13,6 +13,15 @@ import {
 } from "@/lib/admin-api";
 import { parseEmailsFromText } from "@/lib/parse-emails";
 import SelectableAccountList from "@/components/selectable-account-list";
+import AccountDeleteModal from "@/components/account-delete-modal";
+import {
+  formatBulkCreateMessage,
+  formatBulkDeleteByTextMessage,
+  formatBulkDeleteMessage,
+  runChunkedAccountBulkCreate,
+  runChunkedAccountBulkDelete,
+  runChunkedAccountBulkDeleteByText,
+} from "@/lib/bulk-account-chunks";
 import { formatAllocationPair, resolveSchoolAllocations } from "@/lib/school-allocations";
 
 type Props = {
@@ -42,6 +51,7 @@ export default function AdminSchoolAccountsPanel({
   const [error, setError] = useState<string | null>(null);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [addMode, setAddMode] = useState<"single" | "bulk">("single");
   const [newEmail, setNewEmail] = useState("");
   const [bulkText, setBulkText] = useState("");
@@ -114,15 +124,20 @@ export default function AdminSchoolAccountsPanel({
     setBulkResult(null);
     try {
       if (addMode === "bulk") {
-        const result = await adminApi.createSchoolAccountsBulk(
-          schoolId,
-          bulkText,
-          term,
-          effectiveContactId,
+        const result = await runChunkedAccountBulkCreate(bulkText, (chunkText) =>
+          adminApi.createSchoolAccountsBulk(
+            schoolId,
+            chunkText,
+            term,
+            effectiveContactId,
+          ),
         );
         setBulkResult(result);
         await load();
         if (result.created + result.reactivated > 0) setBulkText("");
+        if (bulkPreview.length > 0) {
+          alert(formatBulkCreateMessage(result, bulkPreview.length));
+        }
       } else {
         await adminApi.createSchoolAccount(schoolId, newEmail.trim(), term, effectiveContactId);
         setModalOpen(false);
@@ -164,25 +179,55 @@ export default function AdminSchoolAccountsPanel({
 
   async function onBulkDelete(ids: number[]) {
     try {
-      const result = await adminApi.deleteSchoolAccountsBulk(
-        schoolId,
-        ids,
-        term,
-        effectiveContactId,
+      const result = await runChunkedAccountBulkDelete(ids, (chunk) =>
+        adminApi.deleteSchoolAccountsBulk(schoolId, chunk, term, effectiveContactId),
       );
       await load();
-      if (result.skipped > 0) {
-        alert(
-          `삭제 요청 ${result.deleted}건 · 건너뜀 ${result.skipped}건\nAdobe 동기화는 백그라운드에서 처리됩니다.`,
-        );
-      }
+      alert(formatBulkDeleteMessage(result, ids.length));
     } catch (err) {
       alert(err instanceof AdminApiError ? err.message : "삭제 실패");
     }
   }
 
+  async function onDeleteByEmail(mode: "single" | "bulk", payload: string) {
+    if (writeBlocked) {
+      alert("계정 삭제는 담당자를 선택한 뒤 이용해 주세요.");
+      return;
+    }
+    const previewCount = mode === "bulk" ? parseEmailsFromText(payload).length : 1;
+    const label =
+      mode === "single"
+        ? `'${payload}'`
+        : `입력한 ${previewCount}개 이메일`;
+    if (
+      !confirm(
+        `${label} 계정을 삭제하시겠습니까?\n실패 상태는 포털에서만 제거되고, 그 외는 Adobe에 반영됩니다.`,
+      )
+    ) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await runChunkedAccountBulkDeleteByText(payload, (chunkText) =>
+        adminApi.deleteSchoolAccountsBulkByText(
+          schoolId,
+          chunkText,
+          term,
+          effectiveContactId,
+        ),
+      );
+      setDeleteModalOpen(false);
+      await load();
+      alert(formatBulkDeleteByTextMessage(result, previewCount));
+    } catch (err) {
+      alert(err instanceof AdminApiError ? err.message : "삭제 실패");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   return (
-    <section className="mt-8 rounded-xl border border-indigo-200 bg-white shadow-sm">
+    <section className="mt-8 app-panel">
       <div className="border-b border-indigo-100 bg-indigo-50/40 px-5 py-4">
         <h2 className="text-lg font-semibold text-slate-900">계정 관리</h2>
         <p className="mt-1 text-sm text-slate-600">
@@ -295,14 +340,24 @@ export default function AdminSchoolAccountsPanel({
         <p className="text-sm text-slate-600">
           {loading ? "불러오는 중…" : `등록 수량 ${total.toLocaleString("ko-KR")}`}
         </p>
-        <button
-          type="button"
-          disabled={writeBlocked}
-          onClick={() => setModalOpen(true)}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-        >
-          + 계정 추가
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={writeBlocked}
+            onClick={() => setDeleteModalOpen(true)}
+            className="rounded-lg border border-rose-300 bg-white px-4 py-2 text-sm font-medium text-rose-800 hover:bg-rose-50 disabled:opacity-50"
+          >
+            − 계정 삭제
+          </button>
+          <button
+            type="button"
+            disabled={writeBlocked}
+            onClick={() => setModalOpen(true)}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          >
+            + 계정 추가
+          </button>
+        </div>
       </div>
 
       <SelectableAccountList
@@ -318,7 +373,7 @@ export default function AdminSchoolAccountsPanel({
 
       {modalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-lg max-h-[90vh] overflow-y-auto">
+          <div className="w-full max-w-lg app-panel p-6 max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-semibold">계정 추가</h3>
             <div className="mt-3 flex gap-2 border-b border-slate-200">
               <button
@@ -329,7 +384,7 @@ export default function AdminSchoolAccountsPanel({
                 }}
                 className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
                   addMode === "single"
-                    ? "border-slate-900 text-slate-900"
+                    ? "border-indigo-600 text-indigo-700"
                     : "border-transparent text-slate-500"
                 }`}
               >
@@ -343,7 +398,7 @@ export default function AdminSchoolAccountsPanel({
                 }}
                 className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
                   addMode === "bulk"
-                    ? "border-slate-900 text-slate-900"
+                    ? "border-indigo-600 text-indigo-700"
                     : "border-transparent text-slate-500"
                 }`}
               >
@@ -401,7 +456,7 @@ export default function AdminSchoolAccountsPanel({
                   <button
                     type="submit"
                     disabled={submitting}
-                    className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60"
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm text-white disabled:opacity-60"
                   >
                     {submitting ? "등록 중…" : "등록"}
                   </button>
@@ -414,7 +469,7 @@ export default function AdminSchoolAccountsPanel({
 
       {editId != null ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-lg">
+          <div className="w-full max-w-md app-panel p-6">
             <h3 className="text-lg font-semibold">이메일 수정</h3>
             <form onSubmit={onEdit} className="mt-4 space-y-4">
               <input
@@ -435,7 +490,7 @@ export default function AdminSchoolAccountsPanel({
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60"
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm text-white disabled:opacity-60"
                 >
                   저장
                 </button>
@@ -444,6 +499,13 @@ export default function AdminSchoolAccountsPanel({
           </div>
         </div>
       ) : null}
+
+      <AccountDeleteModal
+        open={deleteModalOpen}
+        onClose={() => setDeleteModalOpen(false)}
+        submitting={submitting}
+        onSubmit={onDeleteByEmail}
+      />
     </section>
   );
 }

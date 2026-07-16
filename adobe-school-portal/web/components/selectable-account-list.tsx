@@ -22,7 +22,7 @@ function StatusBadge({ status }: { status: SelectableAccount["status"] }) {
     removed: "삭제됨",
   };
   return (
-    <span className={`inline-flex rounded-full px-2 py-0.5 text-xs font-medium ${styles[status]}`}>
+    <span className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${styles[status]}`}>
       {labels[status]}
     </span>
   );
@@ -97,11 +97,11 @@ export default function SelectableAccountList({
   }
 
   if (loading) {
-    return <p className="px-5 py-8 text-center text-sm text-slate-500">불러오는 중…</p>;
+    return <p className="px-4 py-8 text-center text-sm text-slate-500 sm:px-5">불러오는 중…</p>;
   }
 
   if (accounts.length === 0) {
-    return <p className="px-5 py-8 text-center text-sm text-slate-500">{emptyMessage}</p>;
+    return <p className="px-4 py-8 text-center text-sm text-slate-500 sm:px-5">{emptyMessage}</p>;
   }
 
   return (
@@ -115,43 +115,43 @@ export default function SelectableAccountList({
           onBulkDelete={() => void handleBulkDelete()}
         />
       ) : null}
-      <div className="flex items-center gap-3 border-b border-slate-100 px-5 py-2 text-xs text-slate-600">
-        <label className="flex items-center gap-2 cursor-pointer">
+      <div className="flex items-center gap-3 border-b border-slate-100 px-4 py-3 text-xs text-slate-600 sm:px-5">
+        <label className="flex min-h-[44px] cursor-pointer items-center gap-3 touch-manipulation">
           <input
             type="checkbox"
             checked={allSelected}
             disabled={actionsDisabled || selectable.length === 0}
             onChange={toggleAll}
-            className="rounded border-slate-300"
+            className="h-4 w-4 rounded border-slate-300"
           />
           전체 선택
         </label>
-        <span className="text-slate-400">(처리 중 계정은 선택할 수 없습니다)</span>
+        <span className="hidden text-slate-400 sm:inline">(처리 중 계정은 선택할 수 없습니다)</span>
       </div>
-      <ul className="divide-y divide-slate-100 px-5 py-2 max-h-[480px] overflow-y-auto">
+      <ul className="account-mobile-cards max-h-[min(60vh,480px)] divide-y divide-slate-100 overflow-y-auto px-3 py-1 sm:px-5 sm:py-2 sm:divide-y">
         {accounts.map((a) => {
           const canSelect = a.status !== "pending" && a.status !== "removed";
           return (
-            <li key={a.id} className="flex flex-wrap items-center gap-3 py-3">
-              <input
-                type="checkbox"
-                checked={selected.has(a.id)}
-                disabled={actionsDisabled || !canSelect}
-                onChange={() => toggleOne(a.id)}
-                className="rounded border-slate-300 shrink-0"
-                aria-label={`${a.email} 선택`}
-              />
-              <span className="flex-1 min-w-0 font-mono text-xs sm:text-sm text-slate-900 truncate">
-                {a.email}
-              </span>
-              <div className="flex items-center gap-3">
+            <li key={a.id} className="flex flex-col gap-2 py-3 sm:flex-row sm:flex-wrap sm:items-center sm:gap-3">
+              <div className="flex min-h-[44px] min-w-0 flex-1 items-start gap-3 touch-manipulation">
+                <input
+                  type="checkbox"
+                  checked={selected.has(a.id)}
+                  disabled={actionsDisabled || !canSelect}
+                  onChange={() => toggleOne(a.id)}
+                  className="mt-1 h-4 w-4 shrink-0 rounded border-slate-300"
+                  aria-label={`${a.email} 선택`}
+                />
+                <span className="min-w-0 flex-1 break-all font-mono text-sm text-slate-900">{a.email}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 pl-7 sm:pl-0">
                 <StatusBadge status={a.status} />
                 {onEdit ? (
                   <button
                     type="button"
                     disabled={actionsDisabled || a.status === "pending"}
                     onClick={() => onEdit(a)}
-                    className="text-xs text-indigo-600 hover:underline disabled:opacity-40"
+                    className="touch-target rounded-lg px-3 py-2 text-sm text-indigo-600 hover:bg-indigo-50 disabled:opacity-40"
                   >
                     수정
                   </button>
@@ -160,7 +160,7 @@ export default function SelectableAccountList({
                   type="button"
                   disabled={actionsDisabled || a.status === "pending"}
                   onClick={() => void onDeleteOne(a.id, a.email)}
-                  className="text-xs text-red-600 hover:underline disabled:opacity-40"
+                  className="touch-target rounded-lg px-3 py-2 text-sm text-red-600 hover:bg-red-50 disabled:opacity-40"
                 >
                   삭제
                 </button>
@@ -187,14 +187,14 @@ function SelectionBar({
   onBulkDelete: () => void;
 }) {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-2 border-b border-amber-100 bg-amber-50/80 px-5 py-2">
+    <div className="flex flex-col gap-2 border-b border-amber-100 bg-amber-50/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-5">
       <span className="text-sm font-medium text-amber-900">{selectedCount}개 선택됨</span>
       <div className="flex gap-2">
         <button
           type="button"
           onClick={onClear}
           disabled={deleting}
-          className="rounded-lg border border-amber-200 px-3 py-1.5 text-xs text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+          className="touch-target flex-1 rounded-lg border border-amber-200 px-3 py-2.5 text-sm text-amber-900 hover:bg-amber-100 disabled:opacity-50 sm:flex-none"
         >
           선택 해제
         </button>
@@ -202,7 +202,7 @@ function SelectionBar({
           type="button"
           onClick={onBulkDelete}
           disabled={actionsDisabled || deleting}
-          className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-50"
+          className="touch-target flex-1 rounded-lg bg-red-600 px-3 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 sm:flex-none"
         >
           {deleting ? "삭제 요청 중…" : "선택 삭제"}
         </button>

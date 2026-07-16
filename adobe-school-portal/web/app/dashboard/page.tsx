@@ -4,10 +4,20 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import PortalNav from "@/components/portal-nav";
 import SelectableAccountList from "@/components/selectable-account-list";
-import { Account, AccountBulkResult, ApiError, MeResponse, QuotaUsage, api } from "@/lib/api";
+import AccountDeleteModal from "@/components/account-delete-modal";
+import { Account, AccountBulkResult, ApiError, MeResponse, QuotaUsage, api, downloadContactAccountsExcel } from "@/lib/api";
 import { getStoredContractTerm, setStoredContractTerm } from "@/lib/contract-term";
 import { formatContactLicenseTerms } from "@/lib/contact-terms";
+import {
+  formatBulkCreateMessage,
+  formatBulkDeleteByTextMessage,
+  formatBulkDeleteMessage,
+  runChunkedAccountBulkCreate,
+  runChunkedAccountBulkDelete,
+  runChunkedAccountBulkDeleteByText,
+} from "@/lib/bulk-account-chunks";
 import { parseEmailsFromText } from "@/lib/parse-emails";
+import { mobileMain } from "@/lib/ui-classes";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -17,6 +27,7 @@ export default function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [addMode, setAddMode] = useState<"single" | "bulk">("single");
   const [newEmail, setNewEmail] = useState("");
   const [bulkText, setBulkText] = useState("");
@@ -25,6 +36,9 @@ export default function DashboardPage() {
   const [editEmail, setEditEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [selectedTerm, setSelectedTerm] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [emailSearch, setEmailSearch] = useState("");
+  const [appliedEmailSearch, setAppliedEmailSearch] = useState("");
 
   const load = useCallback(async () => {
     try {
@@ -45,7 +59,7 @@ export default function DashboardPage() {
       }
       setMe(meData);
 
-      const accData = await api.accountsAll();
+      const accData = await api.accountsAll(appliedEmailSearch || undefined);
       setAccounts(accData.items);
       setAccountTotal(accData.total);
       setError(null);
@@ -62,7 +76,7 @@ export default function DashboardPage() {
     } finally {
       setLoading(false);
     }
-  }, [router]);
+  }, [router, appliedEmailSearch]);
 
   useEffect(() => {
     void load();
@@ -79,7 +93,7 @@ export default function DashboardPage() {
     setSelectedTerm(term);
     setLoading(true);
     try {
-      const accData = await api.accountsAll();
+      const accData = await api.accountsAll(appliedEmailSearch || undefined);
       setAccounts(accData.items);
       setAccountTotal(accData.total);
       setError(null);
@@ -123,11 +137,16 @@ export default function DashboardPage() {
     setBulkResult(null);
     try {
       if (addMode === "bulk") {
-        const result = await api.createAccountsBulk(bulkText);
+        const result = await runChunkedAccountBulkCreate(bulkText, (chunkText) =>
+          api.createAccountsBulk(chunkText),
+        );
         setBulkResult(result);
         await load();
         if (result.created + result.reactivated > 0) {
           setBulkText("");
+        }
+        if (bulkPreview.length > 0) {
+          alert(formatBulkCreateMessage(result, bulkPreview.length));
         }
       } else {
         await api.createAccount(newEmail.trim());
@@ -169,21 +188,48 @@ export default function DashboardPage() {
 
   async function onBulkDelete(ids: number[]) {
     try {
-      const result = await api.deleteAccountsBulk(ids);
+      const result = await runChunkedAccountBulkDelete(ids, (chunk) =>
+        api.deleteAccountsBulk(chunk),
+      );
       await load();
-      if (result.skipped > 0) {
-        alert(
-          `삭제 요청 ${result.deleted}건 · 건너뜀 ${result.skipped}건\nAdobe 동기화는 백그라운드에서 처리됩니다.`,
-        );
-      }
+      alert(formatBulkDeleteMessage(result, ids.length));
     } catch (err) {
       alert(err instanceof ApiError ? err.message : "삭제 실패");
     }
   }
 
+  async function onDeleteByEmail(mode: "single" | "bulk", payload: string) {
+    const previewCount = mode === "bulk" ? parseEmailsFromText(payload).length : 1;
+    const label =
+      mode === "single"
+        ? `'${payload}'`
+        : `입력한 ${previewCount}개 이메일`;
+    if (
+      !confirm(
+        `${label} 계정을 삭제하시겠습니까?\n실패 상태는 포털에서만 제거되고, 그 외는 Adobe에 반영됩니다.`,
+      )
+    ) {
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const text = mode === "single" ? payload : payload;
+      const result = await runChunkedAccountBulkDeleteByText(text, (chunkText) =>
+        api.deleteAccountsBulkByText(chunkText),
+      );
+      setDeleteModalOpen(false);
+      await load();
+      alert(formatBulkDeleteByTextMessage(result, previewCount));
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "삭제 실패");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-50">
+      <div className={`min-h-screen ${mobileMain}`}>
         <PortalNav />
         <p className="p-8 text-center text-slate-500">불러오는 중…</p>
       </div>
@@ -191,12 +237,15 @@ export default function DashboardPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50">
-      <PortalNav schoolName={me?.school.name} />
-      <main className="mx-auto max-w-5xl px-4 py-6">
+    <div className={`min-h-screen ${mobileMain}`}>
+      <PortalNav
+        schoolName={me?.school.name}
+        showContactSwitch={(me?.contacts.length ?? 0) > 1}
+      />
+      <main className="mx-auto max-w-5xl px-3 py-5 sm:px-4 sm:py-6">
         {error ? <p className="mb-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p> : null}
 
-        <section className="rounded-xl border border-indigo-100 bg-indigo-50/50 p-4 mb-4">
+        <section className="app-panel-accent mb-4">
           <p className="text-xs font-medium text-indigo-800">현재 로그인 학교</p>
           <p className="text-lg font-bold text-slate-900">{me?.school.name}</p>
           <p className="text-sm text-slate-600">사업자등록번호: {me?.school.biz_no}</p>
@@ -222,7 +271,7 @@ export default function DashboardPage() {
                   onClick={() => void onSelectTerm(q.contract_term)}
                   className={`rounded-lg px-4 py-2 text-sm font-medium transition-colors ${
                     selectedTerm === q.contract_term
-                      ? "bg-slate-900 text-white"
+                      ? "bg-indigo-600 text-white"
                       : "bg-white border border-slate-200 text-slate-700 hover:bg-slate-50"
                   }`}
                 >
@@ -237,7 +286,7 @@ export default function DashboardPage() {
           </p>
         ) : null}
 
-        <section className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+        <section className="app-panel p-5">
           <h2 className="text-lg font-semibold text-slate-900">
             계정 사용량{quota ? ` · ${quota.label}` : ""}
           </h2>
@@ -261,7 +310,7 @@ export default function DashboardPage() {
           </div>
         </section>
 
-        <section className="mt-6 rounded-xl border border-slate-200 bg-white shadow-sm">
+        <section className="mt-6 app-panel">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
             <div>
               <h2 className="text-lg font-semibold text-slate-900">
@@ -276,13 +325,82 @@ export default function DashboardPage() {
                 </p>
               ) : null}
             </div>
-            <button
-              type="button"
-              onClick={() => setModalOpen(true)}
-              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-            >
-              + 계정 추가
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={exporting}
+                onClick={() => {
+                  setExporting(true);
+                  void downloadContactAccountsExcel()
+                    .catch((err) => {
+                      alert(err instanceof ApiError ? err.message : "엑셀 다운로드 실패");
+                    })
+                    .finally(() => setExporting(false));
+                }}
+                className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-50 disabled:opacity-50"
+              >
+                {exporting ? "다운로드 중…" : "엑셀 다운로드"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeleteModalOpen(true)}
+                className="rounded-lg border border-rose-300 bg-white px-4 py-2 text-sm font-medium text-rose-800 hover:bg-rose-50"
+              >
+                − 계정 삭제
+              </button>
+              <button
+                type="button"
+                onClick={() => setModalOpen(true)}
+                className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500"
+              >
+                + 계정 추가
+              </button>
+            </div>
+          </div>
+          <div className="border-b border-slate-100 px-5 py-3">
+            <label className="block text-sm">
+              <span className="font-medium text-slate-700">이메일 검색</span>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                <input
+                  type="search"
+                  value={emailSearch}
+                  onChange={(e) => setEmailSearch(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      setAppliedEmailSearch(emailSearch.trim());
+                    }
+                  }}
+                  placeholder="이메일 일부 · @ 포함 시 2자부터"
+                  className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm font-mono"
+                />
+                <button
+                  type="button"
+                  onClick={() => setAppliedEmailSearch(emailSearch.trim())}
+                  className="shrink-0 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium hover:bg-slate-50"
+                >
+                  검색
+                </button>
+                {appliedEmailSearch ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEmailSearch("");
+                      setAppliedEmailSearch("");
+                    }}
+                    className="shrink-0 rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-600 hover:bg-slate-50"
+                  >
+                    초기화
+                  </button>
+                ) : null}
+              </div>
+            </label>
+            {appliedEmailSearch ? (
+              <p className="mt-2 text-sm text-indigo-800">
+                검색: <span className="font-mono">{appliedEmailSearch}</span>
+                {accountTotal === 0 ? " · 결과 없음" : ` · ${accountTotal.toLocaleString("ko-KR")}건`}
+              </p>
+            ) : null}
           </div>
           <SelectableAccountList
             accounts={accounts}
@@ -298,7 +416,7 @@ export default function DashboardPage() {
 
       {modalOpen ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-xl bg-white p-6 shadow-lg max-h-[90vh] overflow-y-auto">
+          <div className="w-full max-w-lg app-panel p-6 max-h-[90vh] overflow-y-auto">
             <h3 className="text-lg font-semibold">계정 추가</h3>
             <div className="mt-3 flex gap-2 border-b border-slate-200">
               <button
@@ -309,7 +427,7 @@ export default function DashboardPage() {
                 }}
                 className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
                   addMode === "single"
-                    ? "border-slate-900 text-slate-900"
+                    ? "border-indigo-600 text-indigo-700"
                     : "border-transparent text-slate-500"
                 }`}
               >
@@ -323,7 +441,7 @@ export default function DashboardPage() {
                 }}
                 className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px ${
                   addMode === "bulk"
-                    ? "border-slate-900 text-slate-900"
+                    ? "border-indigo-600 text-indigo-700"
                     : "border-transparent text-slate-500"
                 }`}
               >
@@ -392,7 +510,7 @@ export default function DashboardPage() {
                   <button
                     type="submit"
                     disabled={submitting || (addMode === "bulk" && bulkPreview.length === 0)}
-                    className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60"
+                    className="rounded-lg bg-indigo-600 px-4 py-2 text-sm text-white disabled:opacity-60"
                   >
                     {addMode === "bulk"
                       ? submitting
@@ -409,7 +527,7 @@ export default function DashboardPage() {
 
       {editId != null ? (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-md rounded-xl bg-white p-6 shadow-lg">
+          <div className="w-full max-w-md app-panel p-6">
             <h3 className="text-lg font-semibold">이메일 수정</h3>
             <form onSubmit={onEdit} className="mt-4 space-y-4">
               <input
@@ -426,7 +544,7 @@ export default function DashboardPage() {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-60"
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm text-white disabled:opacity-60"
                 >
                   저장
                 </button>
@@ -435,6 +553,13 @@ export default function DashboardPage() {
           </div>
         </div>
       ) : null}
+
+      <AccountDeleteModal
+        open={deleteModalOpen}
+        onClose={() => setDeleteModalOpen(false)}
+        submitting={submitting}
+        onSubmit={onDeleteByEmail}
+      />
     </div>
   );
 }

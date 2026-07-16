@@ -170,12 +170,15 @@ curl -s -b cookies.txt http://localhost:8010/auth/me
 ### 엑셀 → DB 일괄 등록
 
 ```bash
-# 학교 + 좌석(수량)
-docker compose exec api python /scripts/import_schools_from_excel.py
+# 학교 + 좌석(수량) — 계약 차수 지정
+docker compose exec api python /scripts/reimport_excel_terms.py --terms CY26-H1
 
 # Named 메일을 초기 active 계정으로 + 학교별 토큰 CSV 발급
-docker compose exec api python /scripts/import_schools_from_excel.py --with-accounts --issue-tokens
+docker compose exec api python /scripts/reimport_excel_terms.py --terms CY26-H1 --with-accounts --issue-tokens
 # → data/out/학교_액세스토큰_발급.csv
+
+# 전체 차수 재적재 (DB 초기화 후)
+docker compose exec api python /scripts/reimport_excel_terms.py --purge --with-accounts
 ```
 
 `.env`에 Adobe IMS 자격을 넣으면 계정 추가·삭제·수정이 **UMAPI**로 `sync_queue` → `worker`에 반영됩니다. 해당 기간에 키가 없으면 **개발 스텁**으로 DB만 즉시 반영됩니다.

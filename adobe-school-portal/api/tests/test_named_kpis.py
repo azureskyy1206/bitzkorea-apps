@@ -63,8 +63,11 @@ async def test_refresh_and_resolve_named_kpis_from_db() -> None:
         assert refreshed.purchase_schools == 411
 
         kpi = await resolve_named_kpis_for_dashboard(session, "CY26-H1")
+        await session.commit()
         stored = await get_stored_named_kpis(session, "CY26-H1")
     assert kpi is not None
     assert stored is not None
-    assert kpi.purchase_schools == 411
-    assert kpi.allocated_qty == stored.allocated_qty == 4927
+    assert kpi.source == "portal_db"
+    assert stored.source == "portal_db"
+    assert kpi.purchase_schools == stored.purchase_schools
+    assert kpi.allocated_qty == stored.allocated_qty

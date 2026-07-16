@@ -2,18 +2,28 @@
 
 import Link from "next/link";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { AdminApiError, CONTRACT_TERMS, SchoolListItem, adminApi } from "@/lib/admin-api";
+import {
+  AdminApiError,
+  CONTRACT_TERMS,
+  SendLoginGuideResult,
+  SchoolListItem,
+  adminApi,
+} from "@/lib/admin-api";
+import SendLoginGuideResultPanel from "@/components/send-login-guide-result";
 import {
   ALLOCATION_PAIR_HINT,
   filterAllocationsByTerms,
   formatAllocationPair,
   licenseRegistrationLabel,
   registrationFilterQuery,
+  parseSchoolListRowKey,
   resolveSchoolAllocations,
+  schoolListRowKey,
   sumAllocationTotal,
   sumAllocationUsed,
   type RegistrationFilterKey,
 } from "@/lib/school-allocations";
+import { mobileMain, tableWrap } from "@/lib/ui-classes";
 
 const ALL_TERM_CODES = CONTRACT_TERMS.map((t) => t.code);
 const ALL_ASSIGN_KEYS: RegistrationFilterKey[] = ["assigned", "unassigned"];
@@ -23,12 +33,20 @@ function CellDash({ value }: { value: string | null | undefined }) {
   return <span className="break-all">{value}</span>;
 }
 
+function sdlFilterFromFlags(sdlOnly: boolean, namedOnly: boolean): boolean | undefined {
+  if (sdlOnly) return true;
+  if (namedOnly) return false;
+  return undefined;
+}
+
 export default function AdminSchoolsPage() {
   const [items, setItems] = useState<SchoolListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [q, setQ] = useState("");
   const [search, setSearch] = useState("");
+  const [sdlOnly, setSdlOnly] = useState(false);
+  const [namedOnly, setNamedOnly] = useState(false);
   const [selectedTerms, setSelectedTerms] = useState<Set<string>>(
     () => new Set(ALL_TERM_CODES),
   );
@@ -37,14 +55,25 @@ export default function AdminSchoolsPage() {
   >(() => new Set(ALL_ASSIGN_KEYS));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [mailSelectableTotal, setMailSelectableTotal] = useState<number | null>(null);
+  const [selectAllBusy, setSelectAllBusy] = useState(false);
+  const [sendBusy, setSendBusy] = useState(false);
+  const [sendResult, setSendResult] = useState<SendLoginGuideResult | null>(null);
+
+  const listFilterOpts = useMemo(
+    () => ({
+      contractTerms: [...selectedTerms],
+      registration: registrationFilterQuery(selectedRegistration),
+      sdl: sdlFilterFromFlags(sdlOnly, namedOnly),
+    }),
+    [selectedTerms, selectedRegistration, sdlOnly, namedOnly],
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await adminApi.schools(page, search, {
-        contractTerms: [...selectedTerms],
-        registration: registrationFilterQuery(selectedRegistration),
-      });
+      const data = await adminApi.schools(page, search, listFilterOpts);
       setItems(data.items);
       setTotal(data.total);
       setError(null);
@@ -53,11 +82,16 @@ export default function AdminSchoolsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, search, selectedTerms, selectedRegistration]);
+  }, [page, search, listFilterOpts]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    setSelected(new Set());
+    setMailSelectableTotal(null);
+  }, [search, selectedTerms, selectedRegistration, sdlOnly, namedOnly]);
 
   function onSearch(e: FormEvent) {
     e.preventDefault();
@@ -94,7 +128,70 @@ export default function AdminSchoolsPage() {
   }
 
   const pages = Math.max(1, Math.ceil(total / 30));
-  const colSpan = 9;
+  const colSpan = 11;
+
+  const selectableOnPage = useMemo(
+    () => items.filter((s) => s.contact_email && s.contact_email.trim()),
+    [items],
+  );
+
+  const allMatchingSelected =
+    mailSelectableTotal != null &&
+    mailSelectableTotal > 0 &&
+    selected.size === mailSelectableTotal;
+
+  function toggleRow(s: SchoolListItem) {
+    const key = schoolListRowKey(s);
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+    setMailSelectableTotal(null);
+  }
+
+  async function toggleSelectAllMatching() {
+    if (allMatchingSelected) {
+      setSelected(new Set());
+      setMailSelectableTotal(null);
+      return;
+    }
+    setSelectAllBusy(true);
+    try {
+      const data = await adminApi.schoolsMailSelection(search, listFilterOpts);
+      setMailSelectableTotal(data.total);
+      setSelected(new Set(data.items.map((r) => schoolListRowKey(r))));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : "전체 선택 불러오기 실패");
+    } finally {
+      setSelectAllBusy(false);
+    }
+  }
+
+  async function sendSelectedEmails() {
+    if (selected.size === 0) return;
+    if (
+      !confirm(
+        `선택한 ${selected.size}명에게 로그인 안내 메일을 발송합니다. 계속하시겠습니까?`,
+      )
+    ) {
+      return;
+    }
+    setSendBusy(true);
+    setError(null);
+    try {
+      const result = await adminApi.sendLoginGuide([...selected].map(parseSchoolListRowKey));
+      setSendResult(result);
+      setSelected(new Set());
+      setMailSelectableTotal(null);
+    } catch (err) {
+      setError(err instanceof AdminApiError ? err.message : "메일 발송 실패");
+    } finally {
+      setSendBusy(false);
+    }
+  }
 
   const termFilterHint = useMemo(() => {
     if (selectedTerms.size === ALL_TERM_CODES.length) return null;
@@ -110,27 +207,70 @@ export default function AdminSchoolsPage() {
     return "등록 0건(미할당) 담당자만";
   }, [selectedRegistration]);
 
-  return (
-    <main className="mx-auto max-w-[90rem] px-4 py-8">
-      <h1 className="text-2xl font-bold text-slate-900">학교 관리</h1>
-      <p className="mt-1 text-sm text-slate-600">총 {total}건 (담당자별 행)</p>
+  const licenseTypeFilterHint = useMemo(() => {
+    if (sdlOnly) return "SDL 등록 담당자만 (학교 내 Named 담당자 제외)";
+    if (namedOnly) return "Named(Named 등록, SDL 없음) 학교만";
+    return null;
+  }, [sdlOnly, namedOnly]);
 
-      <form onSubmit={onSearch} className="mt-6 flex gap-2">
+  return (
+    <main className={`mx-auto max-w-[90rem] px-3 py-5 sm:px-4 sm:py-8 ${mobileMain}`}>
+      <div className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">학교 관리</h1>
+          <p className="mt-1 text-sm text-slate-600">총 {total}건 (담당자별 행)</p>
+        </div>
+        <Link
+          href="/admin/email-templates"
+          className="text-sm font-medium text-indigo-600 hover:underline"
+        >
+          메일 양식 수정
+        </Link>
+      </div>
+
+      {selected.size > 0 ? (
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-indigo-200 bg-indigo-50 px-4 py-3">
+          <span className="text-sm text-indigo-900">{selected.size}명 선택됨</span>
+          <button
+            type="button"
+            disabled={sendBusy}
+            onClick={() => void sendSelectedEmails()}
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {sendBusy ? "발송 중…" : "로그인 안내 메일 발송"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setSelected(new Set());
+              setMailSelectableTotal(null);
+            }}
+            className="text-sm text-indigo-700 hover:underline"
+          >
+            선택 해제
+          </button>
+        </div>
+      ) : null}
+
+      <form onSubmit={onSearch} className="mt-6 flex flex-col gap-2 sm:flex-row">
         <input
           type="search"
           placeholder="학교명·사업자번호 검색"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm"
+          className="touch-target flex-1 rounded-lg border border-slate-300 px-3 py-2.5 text-sm"
         />
-        <button type="submit" className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white">
+        <button
+          type="submit"
+          className="touch-target flex-1 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-medium text-white sm:flex-none"
+        >
           검색
         </button>
       </form>
 
       <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
         <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-          라이선스 기간 표시
+          라이선스 기간 필터
         </p>
         <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2">
           {CONTRACT_TERMS.map((t) => (
@@ -151,9 +291,13 @@ export default function AdminSchoolsPage() {
         </div>
         {termFilterHint ? (
           <p className="mt-2 text-xs text-indigo-700">
-            선택된 기간만 표시: {termFilterHint}
+            목록·전체선택에 적용: {termFilterHint}
           </p>
-        ) : null}
+        ) : (
+          <p className="mt-2 text-xs text-slate-500">
+            선택한 기간에 좌석(quota)이 있는 담당자만 목록에 표시됩니다.
+          </p>
+        )}
       </div>
 
       <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
@@ -185,34 +329,82 @@ export default function AdminSchoolsPage() {
         ) : null}
       </div>
 
+      <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+          라이선스 유형 필터
+        </p>
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-2">
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-800">
+            <input
+              type="checkbox"
+              checked={sdlOnly}
+              onChange={(e) => {
+                setPage(1);
+                setSdlOnly(e.target.checked);
+                if (e.target.checked) setNamedOnly(false);
+              }}
+              className="rounded border-slate-300"
+            />
+            SDL만
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 text-sm text-slate-800">
+            <input
+              type="checkbox"
+              checked={namedOnly}
+              onChange={(e) => {
+                setPage(1);
+                setNamedOnly(e.target.checked);
+                if (e.target.checked) setSdlOnly(false);
+              }}
+              className="rounded border-slate-300"
+            />
+            Named만
+          </label>
+        </div>
+        {licenseTypeFilterHint ? (
+          <p className="mt-2 text-xs text-indigo-700">목록 필터: {licenseTypeFilterHint}</p>
+        ) : null}
+      </div>
+
       {error ? (
         <p className="mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700">{error}</p>
       ) : loading ? (
         <p className="mt-8 text-center text-slate-500">불러오는 중…</p>
       ) : (
-        <div className="mt-6 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className={`mt-6 ${tableWrap} app-panel`}>
           <table className="min-w-full text-left text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-xs uppercase text-slate-500">
-              <tr>
-                <th className="px-3 py-3 whitespace-nowrap">학교명</th>
-                <th className="px-3 py-3 whitespace-nowrap">사업자번호</th>
-                <th className="px-3 py-3 whitespace-nowrap">담당자</th>
-                <th className="px-3 py-3 whitespace-nowrap">담당자 연락처</th>
-                <th className="px-3 py-3 whitespace-nowrap">담당자 이메일</th>
-                <th className="px-3 py-3 min-w-[10rem]">
+              <tr className="align-middle">
+                <th className="px-3 py-3 align-middle whitespace-nowrap w-10">
+                  <input
+                    type="checkbox"
+                    checked={allMatchingSelected}
+                    onChange={() => void toggleSelectAllMatching()}
+                    disabled={selectAllBusy || selectableOnPage.length === 0}
+                    title="필터 조건 전체 선택 (모든 페이지)"
+                    aria-label="필터 조건 전체 선택"
+                  />
+                </th>
+                <th className="px-3 py-3 align-middle whitespace-nowrap">학교명</th>
+                <th className="px-3 py-3 align-middle whitespace-nowrap">사업자번호</th>
+                <th className="px-3 py-3 align-middle whitespace-nowrap">SDL</th>
+                <th className="px-3 py-3 align-middle whitespace-nowrap">담당자</th>
+                <th className="px-3 py-3 align-middle whitespace-nowrap">담당자 연락처</th>
+                <th className="px-3 py-3 align-middle whitespace-nowrap">담당자 이메일</th>
+                <th className="px-3 py-3 align-middle min-w-[10rem]">
                   라이선스 할당량
                   <span className="mt-0.5 block font-normal normal-case text-slate-400">
                     {ALLOCATION_PAIR_HINT}
                   </span>
                 </th>
-                <th className="px-3 py-3 whitespace-nowrap">라이선스 할당/미할당</th>
-                <th className="px-3 py-3 whitespace-nowrap">
+                <th className="px-3 py-3 align-middle whitespace-nowrap">라이선스 할당/미할당</th>
+                <th className="px-3 py-3 align-middle whitespace-nowrap">
                   할당 합계
                   <span className="mt-0.5 block font-normal normal-case text-slate-400">
                     {ALLOCATION_PAIR_HINT}
                   </span>
                 </th>
-                <th className="px-3 py-3" />
+                <th className="px-3 py-3 align-middle" />
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -230,7 +422,8 @@ export default function AdminSchoolsPage() {
                 </tr>
               ) : (
                 items.map((s) => {
-                  const rowKey = `${s.school_id}-${s.contact_id ?? "none"}`;
+                  const rowKey = schoolListRowKey(s);
+                  const canSelect = Boolean(s.contact_email && s.contact_email.trim());
                   const allocations = filterAllocationsByTerms(
                     resolveSchoolAllocations(s.allocations, s.quotas),
                     selectedTerms,
@@ -238,23 +431,42 @@ export default function AdminSchoolsPage() {
                   const usedSum = sumAllocationUsed(allocations);
                   const totalSum = sumAllocationTotal(allocations, s.allocation_total);
                   return (
-                    <tr key={rowKey} className="hover:bg-slate-50 align-top">
-                      <td className="px-3 py-3 font-medium text-slate-900 whitespace-nowrap">
+                    <tr key={rowKey} className="hover:bg-slate-50">
+                      <td className="px-3 py-3 align-middle">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(rowKey)}
+                          disabled={!canSelect}
+                          onChange={() => toggleRow(s)}
+                          title={canSelect ? "메일 발송 선택" : "이메일 없음"}
+                          aria-label={`${s.name} ${s.contact_name ?? ""} 선택`}
+                        />
+                      </td>
+                      <td className="px-3 py-3 align-middle font-medium text-slate-900">
                         {s.name}
                       </td>
-                      <td className="px-3 py-3 font-mono text-xs text-slate-600 whitespace-nowrap">
+                      <td className="px-3 py-3 align-middle font-mono text-xs text-slate-600 whitespace-nowrap">
                         {s.biz_no}
                       </td>
-                      <td className="px-3 py-3 text-slate-700 max-w-[8rem]">
+                      <td className="px-3 py-3 align-middle whitespace-nowrap">
+                        {s.sdl ? (
+                          <span className="rounded-full bg-emerald-100 px-2 py-1 text-xs font-semibold text-emerald-800">
+                            SDL
+                          </span>
+                        ) : (
+                          <span className="text-xs text-slate-400">—</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-3 align-middle text-slate-700 max-w-[8rem]">
                         <CellDash value={s.contact_name} />
                       </td>
-                      <td className="px-3 py-3 text-slate-700 max-w-[8rem]">
+                      <td className="px-3 py-3 align-middle text-slate-700 max-w-[8rem]">
                         <CellDash value={s.contact_phone} />
                       </td>
-                      <td className="px-3 py-3 text-slate-700 max-w-[10rem]">
+                      <td className="px-3 py-3 align-middle text-slate-700 max-w-[10rem]">
                         <CellDash value={s.contact_email} />
                       </td>
-                      <td className="px-3 py-3 text-slate-600">
+                      <td className="px-3 py-3 align-middle text-slate-600">
                         {allocations.length === 0 ? (
                           <span className="text-slate-400">—</span>
                         ) : (
@@ -270,7 +482,7 @@ export default function AdminSchoolsPage() {
                           </ul>
                         )}
                       </td>
-                      <td className="px-3 py-3">
+                      <td className="px-3 py-3 align-middle">
                         {allocations.length === 0 ? (
                           <span className="text-slate-400">—</span>
                         ) : (
@@ -296,12 +508,12 @@ export default function AdminSchoolsPage() {
                           </ul>
                         )}
                       </td>
-                      <td className="px-3 py-3 font-medium text-slate-900 whitespace-nowrap">
+                      <td className="px-3 py-3 align-middle font-medium text-slate-900 whitespace-nowrap">
                         {allocations.length === 0
                           ? "—"
                           : formatAllocationPair(usedSum, totalSum)}
                       </td>
-                      <td className="px-3 py-3 text-right whitespace-nowrap">
+                      <td className="px-3 py-3 align-middle text-right whitespace-nowrap">
                         <Link
                           href={`/admin/schools/${s.school_id}`}
                           className="text-xs text-indigo-600 hover:underline"
@@ -340,6 +552,9 @@ export default function AdminSchoolsPage() {
             다음
           </button>
         </div>
+      ) : null}
+      {sendResult ? (
+        <SendLoginGuideResultPanel result={sendResult} onClose={() => setSendResult(null)} />
       ) : null}
     </main>
   );

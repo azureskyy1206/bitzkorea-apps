@@ -24,7 +24,7 @@ function EmailTable({
     <section className="mt-8">
       <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
       {hint ? <p className="mt-1 text-sm text-slate-600">{hint}</p> : null}
-      <div className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm">
+      <div className="mt-3 overflow-hidden app-panel">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-slate-100 bg-slate-50 text-xs uppercase text-slate-500">
             <tr>
@@ -124,7 +124,7 @@ export default function AdminReconcilePage() {
 
       <form
         onSubmit={onSubmit}
-        className="mt-8 space-y-4 rounded-xl border border-slate-200 bg-white p-6 shadow-sm"
+        className="mt-8 space-y-4 app-panel p-6"
       >
         <label className="block text-sm">
           <span className="font-medium text-slate-700">계약 기간</span>
@@ -161,7 +161,7 @@ export default function AdminReconcilePage() {
           <button
             type="submit"
             disabled={loading}
-            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+            className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white hover:bg-indigo-500 disabled:opacity-50"
           >
             엑셀 + Adobe 대조
           </button>

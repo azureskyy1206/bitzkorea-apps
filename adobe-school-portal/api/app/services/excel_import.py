@@ -19,6 +19,7 @@ from app.security.rls import set_current_school_id
 from app.security.school_contact import parse_school_and_contact
 from app.security.school_match import (
     find_canonical_school_for_named_key,
+    normalize_school_name,
     school_names_match_loose,
     split_school_quota_suffix,
 )
@@ -29,11 +30,29 @@ from app.services.contact_service import (
 )
 from app.services.quota_aggregate import cleanup_duplicate_school_level_quotas
 from app.services.school_merge import canonical_school_name, find_school_for_import, merge_duplicate_schools_by_biz_no
-from app.services.token_service import generate_plain_token, hash_access_token
+from app.services.token_service import create_unique_access_token
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
+
+
+def _named_row_matches_school_filter(school_key: str, school_filter: str | None) -> bool:
+    """Named 행이 import 대상인지 — 접두사 부분일치(교육청⊂교육청감사관) 금지."""
+    if not school_filter:
+        return True
+    if school_names_match_loose(school_filter, school_key):
+        return True
+    a = normalize_school_name(school_key)
+    b = normalize_school_name(school_filter)
+    if not a or not b:
+        return False
+    if len(b) < 3:
+        return a == b
+    return b in a or a in b
 CONTACT_COL_HINTS = ("담당자", "담당", "contact", "담당자명")
 NAMED_QTY_COL = "Named 수량"
+# CY26 등 일부 최종 리스트는 구매 수량 열명이 "수량"만 있음
+NAMED_QTY_COLUMNS = (NAMED_QTY_COL, "수량")
+LIST_PURCHASER_COL_HINTS = ("구매자명", "구매자")
 # 최종 리스트 행정담당 열은 라이선스 담당자가 아님 — quota·contact 생성에 쓰지 않음
 ADMIN_CONTACT_COL_HINTS = ("행정담당",)
 
@@ -203,17 +222,19 @@ def is_admin_only_contact_name(
 
 def _parse_named_quantity(row: pd.Series) -> int | None:
     """최종 리스트 Named 수량 — 없거나 0이면 None."""
-    raw = row.get(NAMED_QTY_COL)
-    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-        return None
-    text = str(raw).strip()
-    if not text or text.lower() == "nan":
-        return None
-    try:
-        qty = int(float(text.replace(",", "")))
-    except (ValueError, TypeError):
-        return None
-    return qty if qty > 0 else None
+    for col in NAMED_QTY_COLUMNS:
+        raw = row.get(col)
+        if raw is None or (isinstance(raw, float) and pd.isna(raw)):
+            continue
+        text = str(raw).strip()
+        if not text or text.lower() == "nan":
+            continue
+        try:
+            qty = int(float(text.replace(",", "")))
+        except (ValueError, TypeError):
+            continue
+        return qty if qty > 0 else None
+    return None
 
 
 def _parse_application_quantity(row: pd.Series) -> int:
@@ -283,6 +304,40 @@ def load_school_master(path: Path) -> pd.DataFrame:
     return pd.DataFrame(list(agg.values()))
 
 
+def load_list_seats_by_contact(path: Path) -> dict[tuple[str, str | None], int]:
+    """최종 리스트 — (학교, 구매자)별 Named 수량."""
+    xl = pd.ExcelFile(path)
+    sheet = xl.sheet_names[0]
+    hr = _header_row(path, sheet)
+    df = pd.read_excel(path, sheet_name=sheet, header=hr, dtype=str)
+    purchaser_col = _pick_column(list(df.columns), LIST_PURCHASER_COL_HINTS)
+    seats: dict[tuple[str, str | None], int] = {}
+    for _, r in df.iterrows():
+        raw_name = str(r.get("학교명", "")).strip()
+        if not raw_name or raw_name == "nan":
+            continue
+        school_key, contact_from_cell = parse_school_and_contact(raw_name)
+        qty = _parse_named_quantity(r)
+        if qty is None:
+            continue
+        contact_name = contact_from_cell
+        if purchaser_col and not contact_name:
+            contact_name = normalize_contact_name(str(r.get(purchaser_col, "")))
+        key = (school_key, contact_name)
+        seats[key] = seats.get(key, 0) + qty
+    return seats
+
+
+def _school_key_in_named_seats(
+    school_key: str,
+    named_seats: dict[tuple[str, str | None], int],
+) -> bool:
+    return any(
+        seats > 0 and school_names_match_loose(nk, school_key)
+        for (nk, _), seats in named_seats.items()
+    )
+
+
 def load_named_by_school(path: Path) -> dict[str, list[str]]:
     """하위 호환: 학교키만 (담당자 무시)."""
     detailed = load_named_by_school_contact(path)
@@ -311,8 +366,6 @@ def load_named_seats_by_contact(path: Path) -> dict[tuple[str, str | None], int]
     )
     for _, r in df.iterrows():
         raw_school = str(r.get("학교명", "")).strip()
-        if "/" in raw_school:
-            raw_school = raw_school.split("/")[0].strip()
         if not raw_school or raw_school == "nan":
             continue
         school_key, contact_from_cell = parse_school_and_contact(raw_school)
@@ -464,15 +517,10 @@ async def run_schools_import(
         result.updated_quota += 1
 
         if issue_tokens:
-            plain = generate_plain_token()
-            session.add(
-                AccessToken(
-                    school_id=school.id,
-                    token_hash=hash_access_token(plain),
-                    label="excel-import",
-                )
+            plain, _token_row = await create_unique_access_token(
+                session, school.id, label="excel-import"
             )
-            tokens_out.append({"학교명": name, "고유번호증번호": biz_no, "액세스토큰": plain})
+            tokens_out.append({"학교명": name, "액세스토큰": plain})
 
     merge_stats = await merge_duplicate_schools_by_biz_no(session)
     schools_cache = list((await session.execute(select(School))).scalars().all())
@@ -487,6 +535,16 @@ async def run_schools_import(
         )
         await prune_quotas_without_named_allocation(
             session,
+            mail_path=mail_path,
+            schools=schools_cache,
+            contract_term=contract_term,
+            product_id=product_id,
+        )
+
+    if list_path is not None:
+        await upsert_quotas_from_final_list_gaps(
+            session,
+            list_path=list_path,
             mail_path=mail_path,
             schools=schools_cache,
             contract_term=contract_term,
@@ -510,7 +568,7 @@ async def run_schools_import(
         tokens_out_dir.mkdir(parents=True, exist_ok=True)
         out_csv = tokens_out_dir / "학교_액세스토큰_발급.csv"
         with out_csv.open("w", newline="", encoding="utf-8-sig") as f:
-            w = csv.DictWriter(f, fieldnames=["학교명", "고유번호증번호", "액세스토큰"])
+            w = csv.DictWriter(f, fieldnames=["학교명", "액세스토큰"])
             w.writeheader()
             w.writerows(tokens_out)
         result.tokens_csv_path = str(out_csv)
@@ -547,6 +605,7 @@ async def _resolve_contact_id(
     contact_name: str | None,
     *,
     school_key: str | None = None,
+    cache: dict[tuple[int, str], int] | None = None,
 ) -> int | None:
     if not contact_name and school_key:
         school = await session.get(School, school_id)
@@ -565,7 +624,13 @@ async def _resolve_contact_id(
         if len(contacts) == 1:
             return contacts[0].id
         return None
+    norm = normalize_contact_name(contact_name) or contact_name
+    cache_key = (int(school_id), norm)
+    if cache is not None and cache_key in cache:
+        return cache[cache_key]
     contact = await get_or_create_contact(session, school_id, contact_name)
+    if cache is not None:
+        cache[cache_key] = contact.id
     return contact.id
 
 
@@ -603,7 +668,69 @@ async def _upsert_quota_for_contact(
             )
         )
     else:
-        quota.seats_total = seats_total
+        quota.seats_total = max(int(quota.seats_total), seats_total)
+
+
+async def upsert_quotas_from_final_list_gaps(
+    session: AsyncSession,
+    *,
+    list_path: Path,
+    mail_path: Path | None,
+    schools: list[School],
+    contract_term: str,
+    product_id: str,
+    school_filter: str | None = None,
+) -> int:
+    """Named 메일에 없는 학교·담당자는 최종 리스트 Named 수량으로 quota 보완."""
+    list_seats = load_list_seats_by_contact(list_path)
+    named_seats: dict[tuple[str, str | None], int] = {}
+    if mail_path is not None and mail_path.is_file():
+        named_seats = load_named_seats_by_contact(mail_path)
+
+    updated = 0
+    for (school_key, contact_name), seats in list_seats.items():
+        if seats <= 0:
+            continue
+        if not _named_row_matches_school_filter(school_key, school_filter):
+            continue
+        if _school_key_in_named_seats(school_key, named_seats):
+            has_named_for_contact = any(
+                nseats > 0
+                and school_names_match_loose(nk, school_key)
+                and nc == contact_name
+                for (nk, nc), nseats in named_seats.items()
+            )
+            if has_named_for_contact:
+                continue
+        school = find_canonical_school_for_named_key(schools, school_key)
+        if school is None:
+            continue
+        contact_id = await _resolve_contact_id(
+            session, school.id, contact_name, school_key=school_key
+        )
+        q = await session.execute(
+            select(LicenseQuota).where(
+                LicenseQuota.school_id == school.id,
+                LicenseQuota.product_profile_id == product_id,
+                LicenseQuota.contract_term == contract_term,
+                LicenseQuota.contact_id == contact_id
+                if contact_id is not None
+                else LicenseQuota.contact_id.is_(None),
+            )
+        )
+        existing = q.scalar_one_or_none()
+        if existing is not None and int(existing.seats_total) >= seats:
+            continue
+        await _upsert_quota_for_contact(
+            session,
+            school_id=school.id,
+            contact_id=contact_id,
+            contract_term=contract_term,
+            product_id=product_id,
+            seats_total=seats if existing is None else max(int(existing.seats_total), seats),
+        )
+        updated += 1
+    return updated
 
 
 async def upsert_quotas_from_named_mail(
@@ -617,12 +744,21 @@ async def upsert_quotas_from_named_mail(
 ) -> int:
     """Named 메일에 있는 (학교·담당자)만 quota 생성·갱신. 수량 0이면 건너뜀."""
     seats_map = load_named_seats_by_contact(mail_path)
+    contact_cache: dict[tuple[int, str], int] = {}
+    school_ids = [int(s.id) for s in schools]
+    if school_ids:
+        existing = (
+            await session.execute(
+                select(SchoolContact).where(SchoolContact.school_id.in_(school_ids))
+            )
+        ).scalars().all()
+        for c in existing:
+            norm = normalize_contact_name(c.name) if c.name else None
+            if norm:
+                contact_cache[(int(c.school_id), norm)] = int(c.id)
     updated = 0
     for (school_key, contact_name), seats in seats_map.items():
-        if school_filter and not (
-            school_filter in school_key
-            or school_names_match_loose(school_filter, school_key)
-        ):
+        if not _named_row_matches_school_filter(school_key, school_filter):
             continue
         if seats <= 0:
             continue
@@ -630,7 +766,11 @@ async def upsert_quotas_from_named_mail(
         if school is None:
             continue
         contact_id = await _resolve_contact_id(
-            session, school.id, contact_name, school_key=school_key
+            session,
+            school.id,
+            contact_name,
+            school_key=school_key,
+            cache=contact_cache,
         )
         await _upsert_quota_for_contact(
             session,
@@ -663,10 +803,7 @@ async def prune_quotas_without_named_allocation(
     for (school_key, contact_name), seats in seats_map.items():
         if seats <= 0:
             continue
-        if school_filter and not (
-            school_filter in school_key
-            or school_names_match_loose(school_filter, school_key)
-        ):
+        if not _named_row_matches_school_filter(school_key, school_filter):
             continue
         school = find_canonical_school_for_named_key(schools, school_key)
         if school is None:
@@ -761,10 +898,7 @@ async def apply_named_accounts_to_schools(
     seats_map = load_named_seats_by_contact(mail_path) if mail_path is not None else None
 
     for (school_key, contact_name), emails in normalized.items():
-        if school_filter and not (
-            school_filter in school_key
-            or school_names_match_loose(school_filter, school_key)
-        ):
+        if not _named_row_matches_school_filter(school_key, school_filter):
             continue
         school = find_canonical_school_for_named_key(schools, school_key)
         if school is None:
@@ -872,9 +1006,21 @@ async def run_named_accounts_import(
         mail_path=mail_path,
     )
 
+    from app.services.contact_allocation import sync_contact_allocations_from_named_mail
+
+    alloc_stats = await sync_contact_allocations_from_named_mail(
+        session,
+        mail_path=mail_path,
+        schools=schools,
+        contract_term=contract_term,
+        product_id=product_id,
+        school_filter=school_filter,
+    )
+
     result.message = (
         f"Named 계정 {result.created_accounts}건 적재, 학교 미매칭 {skipped_school}건, "
-        f"잘못된 담당 quota 정리 {pruned}건"
+        f"잘못된 담당 quota 정리 {pruned}건, "
+        f"담당 동기화 quota {alloc_stats.quotas_updated}·계정재연결 {alloc_stats.accounts_reassigned}"
     )
     return result
 

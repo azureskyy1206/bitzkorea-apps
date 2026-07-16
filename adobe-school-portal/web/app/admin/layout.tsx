@@ -4,23 +4,35 @@ import { useEffect, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import AdminNav from "@/components/admin-nav";
 import { checkAdminSession } from "@/lib/admin-auth";
+import { mobileMain } from "@/lib/ui-classes";
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [ready, setReady] = useState(false);
-  const isLogin = pathname === "/admin/login";
+  const [sessionOk, setSessionOk] = useState(false);
+  const isAdminHome = pathname === "/admin";
+  const isHelp = pathname?.startsWith("/admin/help");
 
   useEffect(() => {
-    if (isLogin) {
+    if (pathname === "/admin/login") {
+      router.replace("/admin");
+      return;
+    }
+    if (isHelp) {
       setReady(true);
       return;
     }
     let cancelled = false;
     checkAdminSession().then((ok) => {
       if (cancelled) return;
+      setSessionOk(ok);
       if (!ok) {
-        router.replace("/admin/login");
+        if (isAdminHome) {
+          setReady(true);
+          return;
+        }
+        router.replace("/admin");
         return;
       }
       setReady(true);
@@ -28,22 +40,26 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     return () => {
       cancelled = true;
     };
-  }, [isLogin, pathname, router]);
+  }, [isAdminHome, isHelp, pathname, router]);
 
   if (!ready) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-100 text-sm text-slate-500">
+      <div className="flex min-h-screen items-center justify-center text-sm text-slate-500">
         확인 중…
       </div>
     );
   }
 
-  if (isLogin) {
+  if (isHelp) {
+    return <>{children}</>;
+  }
+
+  if (!sessionOk && isAdminHome) {
     return <>{children}</>;
   }
 
   return (
-    <div className="min-h-screen bg-slate-100">
+    <div className={`min-h-screen ${mobileMain}`}>
       <AdminNav />
       {children}
     </div>

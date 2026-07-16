@@ -28,17 +28,8 @@ from sqlalchemy import select, text  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.db import AsyncSessionLocal  # noqa: E402
 from app.license_terms import DEFAULT_CONTRACT_TERM  # noqa: E402
-from app.models import AccessToken, LicenseQuota, School  # noqa: E402
-
-BCRYPT_ROUNDS = 12
-
-
-def hash_token(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt(rounds=BCRYPT_ROUNDS)).decode("utf-8")
-
-
-def generate_plain_token() -> str:
-    return secrets.token_urlsafe(32)
+from app.services.token_service import create_unique_access_token, revoke_active_tokens_for_school  # noqa: E402
+from app.models import LicenseQuota, School  # noqa: E402
 
 
 async def set_rls_school(session, school_id: int) -> None:
@@ -90,14 +81,9 @@ async def upsert_school(
     else:
         quota.seats_total = seats_total
 
-    plain = generate_plain_token()
-    token = AccessToken(
-        school_id=school.id,
-        token_hash=hash_token(plain),
-        label="demo-seed",
-        expires_at=datetime.now(timezone.utc) + timedelta(days=90),
-    )
-    session.add(token)
+    await revoke_active_tokens_for_school(session, school.id)
+    plain, token = await create_unique_access_token(session, school.id, label="demo-seed")
+    token.expires_at = datetime.now(timezone.utc) + timedelta(days=90)
     return school, plain
 
 

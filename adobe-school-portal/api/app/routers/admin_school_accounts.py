@@ -11,6 +11,8 @@ from app.models import Account, School
 from app.schemas.accounts import (
     AccountBulkCreate,
     AccountBulkDelete,
+    AccountBulkDeleteByText,
+    AccountBulkDeleteByTextResponse,
     AccountBulkDeleteResponse,
     AccountBulkResponse,
     AccountCreate,
@@ -26,6 +28,7 @@ from app.services.school_account_ops import (
     account_to_out,
     bulk_create_school_accounts,
     bulk_delete_school_accounts,
+    bulk_delete_school_accounts_by_text,
     create_school_account,
     delete_school_account,
     list_school_accounts,
@@ -243,6 +246,39 @@ async def admin_bulk_delete_accounts(
             school_id=school_id,
             contract_term=contract_term,
             account_ids=body.account_ids,
+            contact_id=cid,
+            scope_all_contacts=cid is None,
+            actor=ADMIN_ACTOR,
+        )
+        await db.commit()
+        return result
+    except LookupError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+@router.post(
+    "/{school_id}/accounts/bulk-delete-by-text",
+    response_model=AccountBulkDeleteByTextResponse,
+)
+async def admin_bulk_delete_accounts_by_text(
+    school_id: int,
+    body: AccountBulkDeleteByText,
+    contract_term: str = Query(..., min_length=1, max_length=32),
+    contact_id: int | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+):
+    if not is_valid_term(contract_term):
+        raise HTTPException(status_code=400, detail="알 수 없는 계약 기간입니다.")
+    await _get_school_or_404(db, school_id)
+    try:
+        cid = await validate_contact_for_school(db, school_id, contact_id)
+        result = await bulk_delete_school_accounts_by_text(
+            db,
+            school_id=school_id,
+            contract_term=contract_term,
+            text=body.text,
             contact_id=cid,
             scope_all_contacts=cid is None,
             actor=ADMIN_ACTOR,

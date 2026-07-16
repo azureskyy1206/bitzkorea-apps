@@ -88,7 +88,7 @@ function AccountSearchContent() {
         <button
           type="submit"
           disabled={loading}
-          className="rounded-lg bg-slate-900 px-5 py-2.5 text-sm font-medium text-white disabled:opacity-60"
+          className="rounded-lg bg-indigo-600 px-5 py-2.5 text-sm font-medium text-white disabled:opacity-60"
         >
           {loading ? "검색 중…" : "검색"}
         </button>
@@ -115,7 +115,7 @@ function AccountSearchContent() {
             return (
               <article
                 key={`${row.account_id}-${row.contract_term}`}
-                className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
+                className="app-panel p-5"
               >
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>

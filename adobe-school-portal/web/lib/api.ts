@@ -135,11 +135,19 @@ export type AccountBulkDeleteResult = {
   items: { account_id: number; email: string | null; status: string }[];
 };
 
+export type AccountBulkDeleteByTextResult = {
+  deleted: number;
+  skipped: number;
+  not_found: string[];
+  invalid: string[];
+  items: { email: string; account_id: number | null; status: string }[];
+};
+
 export const api = {
-  login: (school_name: string, biz_no: string) =>
+  login: (access_token: string) =>
     apiFetch<LoginResponse>("/auth/login", {
       method: "POST",
-      body: JSON.stringify({ school_name, biz_no }),
+      body: JSON.stringify({ access_token }),
     }),
   selectContact: (contact_id: number) =>
     apiFetch<LoginResponse>("/auth/select-contact", {
@@ -149,16 +157,23 @@ export const api = {
   listContacts: () => apiFetch<ContactOption[]>("/auth/contacts"),
   logout: () => apiFetch<{ ok: boolean }>("/auth/logout", { method: "POST" }),
   me: () => apiFetch<MeResponse>("/auth/me"),
-  accounts: (page = 1, limit = 200) =>
-    apiFetch<AccountList>(`/accounts?page=${page}&limit=${limit}`),
-  /** 학교·기간의 전체 계정 (페이지 순회, API limit 최대 200) */
-  accountsAll: async () => {
+  accounts: (page = 1, limit = 200, q?: string) => {
+    const sp = new URLSearchParams({ page: String(page), limit: String(limit) });
+    const term = (q || "").trim();
+    if (term) sp.set("q", term);
+    return apiFetch<AccountList>(`/accounts?${sp}`);
+  },
+  /** 학교·기간의 전체 계정 (페이지 순회, API limit 최대 200). q 있으면 검색 결과만 */
+  accountsAll: async (q?: string) => {
     const limit = 200;
     const items: Account[] = [];
     let page = 1;
     let total = 0;
+    const term = (q || "").trim();
     for (;;) {
-      const res = await apiFetch<AccountList>(`/accounts?page=${page}&limit=${limit}`);
+      const sp = new URLSearchParams({ page: String(page), limit: String(limit) });
+      if (term) sp.set("q", term);
+      const res = await apiFetch<AccountList>(`/accounts?${sp}`);
       total = res.total;
       items.push(...res.items);
       if (items.length >= total || res.items.length < limit) break;
@@ -181,5 +196,47 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ account_ids: accountIds }),
     }),
+  deleteAccountsBulkByText: (text: string) =>
+    apiFetch<AccountBulkDeleteByTextResult>("/accounts/bulk-delete-by-text", {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
   audit: (page = 1) => apiFetch<AuditList>(`/audit?page=${page}&limit=100`),
 };
+
+function parseContentDispositionFilename(disposition: string, fallback: string): string {
+  const utf8 = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8?.[1]) {
+    try {
+      return decodeURIComponent(utf8[1]);
+    } catch {
+      /* ignore */
+    }
+  }
+  const basic = disposition.match(/filename="?([^";]+)"?/);
+  return basic?.[1] ?? fallback;
+}
+
+export async function downloadContactAccountsExcel(): Promise<void> {
+  const term = getStoredContractTerm();
+  const res = await fetch(`${API_BASE}/accounts/export`, {
+    credentials: "include",
+    cache: "no-store",
+    headers: term ? { [CONTRACT_TERM_HEADER]: term } : {},
+  });
+  if (!res.ok) {
+    throw new ApiError(await parseError(res), res.status);
+  }
+  const blob = await res.blob();
+  const disposition = res.headers.get("Content-Disposition") ?? "";
+  const filename = parseContentDispositionFilename(
+    disposition,
+    term ? `할당계정목록_${term}.xlsx` : "할당계정목록.xlsx",
+  );
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}

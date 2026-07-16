@@ -195,17 +195,19 @@ def school_matches_registration_filter(
     registration: set[str],
 ) -> bool:
     """
+    contract_terms: 지정 시 해당 기간 quota/할당 행이 있는 담당자만 통과.
     registration: 'assigned' (등록≥1), 'unassigned' (등록=0).
-    둘 다 있거나 비어 있으면 필터 없음(True).
+    둘 다 있거나 비어 있으면 등록 상태 필터 없음.
     """
-    if not registration or registration >= {"assigned", "unassigned"}:
-        return True
     rows = alloc_rows
     if contract_terms:
         allowed = set(contract_terms)
         rows = [r for r in rows if r.get("contract_term") in allowed]
     if not rows:
         return False
+
+    if not registration or registration >= {"assigned", "unassigned"}:
+        return True
     has_assigned = any(int(r.get("seats_used") or 0) >= 1 for r in rows)
     has_unassigned = any(int(r.get("seats_used") or 0) == 0 for r in rows)
     if registration == {"assigned"}:
@@ -222,6 +224,7 @@ async def batch_contact_allocations_summary(
     """(school_id, contact_id) → 기간별 할당·등록 (contact_id None = 학교 단위)."""
     if not school_ids:
         return {}
+    allowed = set(school_ids)
     quotas = list(
         (
             await session.execute(
@@ -239,30 +242,29 @@ async def batch_contact_allocations_summary(
             .group_by(Account.school_id, Account.contact_id, Account.contract_term)
         )
     ).all()
-    registered_by_contact: dict[tuple[int, int | None, str], int] = {}
-    for sid, cid, term, cnt in reg_rows:
-        registered_by_contact[(int(sid), cid, term)] = int(cnt)
 
-    keys: set[tuple[int, int | None]] = set()
+    quotas_by_pair: dict[tuple[int, int | None], list[LicenseQuota]] = {}
     for q in quotas:
-        keys.add((q.school_id, q.contact_id))
-    for sid, cid, _term in registered_by_contact:
-        keys.add((int(sid), cid))
+        if q.school_id in allowed:
+            quotas_by_pair.setdefault((q.school_id, q.contact_id), []).append(q)
 
-    out: dict[tuple[int, int | None], list[dict[str, int | str]]] = {}
-    for sid, cid in keys:
-        if sid not in school_ids:
+    reg_map_by_pair: dict[tuple[int, int | None], dict[tuple[int, str], int]] = {}
+    for sid, cid, term, cnt in reg_rows:
+        sid_int = int(sid)
+        if sid_int not in allowed:
             continue
-        if cid is None:
-            school_quotas = [q for q in quotas if q.school_id == sid and q.contact_id is None]
-        else:
-            school_quotas = [q for q in quotas if q.school_id == sid and q.contact_id == cid]
-        reg_map = {
-            (sid, term): registered_by_contact[(sid, cid, term)]
-            for (rsid, rcid, term) in registered_by_contact
-            if rsid == sid and rcid == cid
-        }
-        out[(sid, cid)] = _allocations_from_quota_rows(sid, school_quotas, reg_map)
+        pair = (sid_int, cid)
+        reg_map_by_pair.setdefault(pair, {})[(sid_int, str(term))] = int(cnt)
+
+    keys = set(quotas_by_pair.keys()) | set(reg_map_by_pair.keys())
+    out: dict[tuple[int, int | None], list[dict[str, int | str]]] = {}
+    for pair in keys:
+        sid, _cid = pair
+        out[pair] = _allocations_from_quota_rows(
+            sid,
+            quotas_by_pair.get(pair, []),
+            reg_map_by_pair.get(pair, {}),
+        )
     return out
 
 

@@ -90,3 +90,25 @@ async def test_find_school_for_import_by_biz_no():
         assert created is False
         assert found is not None
         assert found.name == "Import매칭고등학교"
+
+
+@pytest.mark.asyncio
+async def test_merge_does_not_combine_different_school_levels_same_biz():
+    """동일 사업자번호·다른 학교급(고↔중)은 병합하지 않음."""
+    biz = f"777-77-{uuid.uuid4().hex[:4]}"
+    async with AsyncSessionLocal() as session:
+        high = School(name="체육분리테스트고등학교", biz_no=biz)
+        mid = School(name="체육분리테스트중학교", biz_no=biz)
+        session.add_all([high, mid])
+        await session.commit()
+
+        stats = await merge_duplicate_schools_by_biz_no(session)
+        await session.commit()
+        assert stats["schools_removed"] == 0
+
+        remaining = list(
+            (await session.execute(select(School).where(School.biz_no == biz))).scalars().all()
+        )
+        assert len(remaining) == 2
+
+        await session.rollback()

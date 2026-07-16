@@ -6,7 +6,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.routers import accounts, admin, admin_auth, admin_manage, admin_school_accounts, audit, auth
+from app.routers import (
+    accounts,
+    admin,
+    admin_auth,
+    admin_email,
+    admin_manage,
+    admin_school_accounts,
+    admin_sdl,
+    audit,
+    auth,
+)
 
 _settings = get_settings()
 _log_level = getattr(logging, _settings.log_level.upper(), logging.INFO)
@@ -67,7 +77,9 @@ app.include_router(accounts.router)
 app.include_router(audit.router)
 app.include_router(admin.router)
 app.include_router(admin_manage.router)
+app.include_router(admin_email.router)
 app.include_router(admin_school_accounts.router)
+app.include_router(admin_sdl.router)
 
 
 @app.middleware("http")

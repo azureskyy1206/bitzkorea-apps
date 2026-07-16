@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Account, AccountStatus, AuditLog, SyncQueue, SyncState
 from app.schemas.accounts import (
+    AccountBulkDeleteByTextItemResult,
+    AccountBulkDeleteByTextResponse,
     AccountBulkDeleteItemResult,
     AccountBulkDeleteResponse,
     AccountBulkItemResult,
@@ -539,6 +541,144 @@ async def bulk_delete_school_accounts(
         raise ValueError("삭제할 수 있는 계정이 없습니다.")
 
     return AccountBulkDeleteResponse(deleted=deleted, skipped=skipped, items=items)
+
+
+async def _lookup_account_by_email(
+    session: AsyncSession,
+    *,
+    school_id: int,
+    contract_term: str,
+    email: str,
+) -> Account | None:
+    return (
+        await session.execute(
+            select(Account).where(
+                Account.school_id == school_id,
+                Account.contract_term == contract_term,
+                Account.email == email,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def bulk_delete_school_accounts_by_text(
+    session: AsyncSession,
+    *,
+    school_id: int,
+    contract_term: str,
+    text: str,
+    contact_id: int | None,
+    scope_all_contacts: bool,
+    actor: str,
+) -> AccountBulkDeleteByTextResponse:
+    emails, invalid_raw = parse_emails_from_text(text)
+    if not emails and not invalid_raw:
+        raise ValueError("유효한 이메일을 찾을 수 없습니다.")
+    if len(emails) > BULK_MAX_EMAILS:
+        raise ValueError(f"한 번에 최대 {BULK_MAX_EMAILS}개까지 삭제할 수 있습니다.")
+
+    items: list[AccountBulkDeleteByTextItemResult] = [
+        AccountBulkDeleteByTextItemResult(email=e, status="invalid") for e in invalid_raw
+    ]
+    not_found: list[str] = []
+    deleted = 0
+    skipped = 0
+    refresh_contact_ids: set[int | None] = set()
+
+    for email in emails:
+        account = await _lookup_account_by_email(
+            session,
+            school_id=school_id,
+            contract_term=contract_term,
+            email=email,
+        )
+        if account is None or not await _account_in_scope(
+            session, school_id, account, contact_id, scope_all_contacts=scope_all_contacts
+        ):
+            skipped += 1
+            not_found.append(email)
+            items.append(AccountBulkDeleteByTextItemResult(email=email, status="not_found"))
+            continue
+        if account.status == AccountStatus.removed:
+            skipped += 1
+            items.append(
+                AccountBulkDeleteByTextItemResult(
+                    email=email,
+                    account_id=account.id,
+                    status="skipped_removed",
+                )
+            )
+            continue
+        if account.status == AccountStatus.pending:
+            skipped += 1
+            items.append(
+                AccountBulkDeleteByTextItemResult(
+                    email=email,
+                    account_id=account.id,
+                    status="skipped_pending",
+                )
+            )
+            continue
+        if account.status == AccountStatus.failed:
+            await remove_failed_account_locally(
+                session,
+                account,
+                school_id=school_id,
+                actor=actor,
+                bulk=True,
+            )
+            refresh_contact_ids.add(account.contact_id)
+            deleted += 1
+            items.append(
+                AccountBulkDeleteByTextItemResult(
+                    email=email,
+                    account_id=account.id,
+                    status="deleted",
+                )
+            )
+            continue
+
+        account.status = AccountStatus.pending
+        await enqueue(session, account, SyncOp.remove)
+        await write_audit(
+            session,
+            school_id=school_id,
+            actor=actor,
+            action="account.remove",
+            target_email=email,
+            payload={
+                "account_id": account.id,
+                "contract_term": account.contract_term,
+                "bulk": True,
+                "by_email": True,
+            },
+            result="queued",
+        )
+        refresh_contact_ids.add(account.contact_id)
+        deleted += 1
+        items.append(
+            AccountBulkDeleteByTextItemResult(
+                email=email,
+                account_id=account.id,
+                status="deleted",
+            )
+        )
+
+    for cid in refresh_contact_ids:
+        await refresh_seats_used(session, school_id, contract_term, contact_id=cid)
+    if contact_id is not None:
+        await refresh_seats_used(session, school_id, contract_term, contact_id=contact_id)
+
+    if deleted == 0 and emails:
+        raise ValueError("삭제할 수 있는 계정이 없습니다.")
+
+    return AccountBulkDeleteByTextResponse(
+        deleted=deleted,
+        skipped=skipped,
+        not_found=not_found,
+        invalid=invalid_raw,
+        items=items,
+    )
 
 
 async def validate_contact_for_school(

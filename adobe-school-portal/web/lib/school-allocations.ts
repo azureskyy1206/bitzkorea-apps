@@ -77,6 +77,33 @@ export function sumAllocationTotal(
   return fromRows;
 }
 
+export type SchoolListRowKeyInput = {
+  school_id: number;
+  contact_id: number | null;
+  contact_name?: string | null;
+  contact_phone?: string | null;
+  contact_email?: string | null;
+};
+
+/** 학교 목록 행·메일 전체선택에서 동일한 선택 키. */
+export function schoolListRowKey(row: SchoolListRowKeyInput): string {
+  if (row.contact_id != null) return `${row.school_id}-c${row.contact_id}`;
+  const ck = [row.contact_name ?? "", row.contact_phone ?? "", row.contact_email ?? ""].join(
+    "\x1f",
+  );
+  return `${row.school_id}-k${encodeURIComponent(ck)}`;
+}
+
+export function parseSchoolListRowKey(key: string): { school_id: number; contact_id?: number } {
+  const dash = key.indexOf("-");
+  const school_id = Number(key.slice(0, dash));
+  const rest = key.slice(dash + 1);
+  if (rest.startsWith("c")) {
+    return { school_id, contact_id: Number(rest.slice(1)) };
+  }
+  return { school_id, contact_id: undefined };
+}
+
 /** @deprecated sumAllocationTotal 사용 */
 export function schoolAllocationTotal(
   allocations: SchoolAllocationTerm[],

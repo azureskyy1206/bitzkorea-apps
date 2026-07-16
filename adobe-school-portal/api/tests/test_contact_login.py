@@ -8,6 +8,23 @@ from httpx import AsyncClient
 from tests.conftest import ADMIN_HEADER
 
 
+async def _login_with_token(
+    client: AsyncClient,
+    admin_headers: dict[str, str],
+    school_id: int,
+) -> None:
+    tok = await client.post(
+        f"/admin/schools/{school_id}/tokens",
+        headers=admin_headers,
+        json={"label": "pytest"},
+    )
+    assert tok.status_code == 201, tok.text
+    plain = tok.json()["plain_token"]
+    login = await client.post("/auth/login", json={"access_token": plain})
+    assert login.status_code == 200, login.text
+    client.cookies.set("portal_session", login.cookies["portal_session"])
+
+
 @pytest.mark.asyncio
 async def test_multi_contact_login_requires_selection(client: AsyncClient, admin_headers: dict[str, str]):
     suffix = uuid.uuid4().hex[:8]
@@ -54,20 +71,16 @@ async def test_multi_contact_login_requires_selection(client: AsyncClient, admin
         )
         await session.commit()
 
-    login = await client.post(
-        "/auth/login",
-        json={"school_name": school_name, "biz_no": biz_no},
-    )
-    assert login.status_code == 200
-    body = login.json()
+    login = await _login_with_token(client, admin_headers, school_id)
+    body = (await client.get("/auth/me")).json()
     assert body["needs_contact_selection"] is True
     assert len(body["contacts"]) == 2
-    client.cookies.set("portal_session", login.cookies["portal_session"])
+    contacts = body["contacts"]
 
     accounts_before = await client.get("/accounts")
     assert accounts_before.status_code == 403
 
-    pick = await client.post("/auth/select-contact", json={"contact_id": body["contacts"][0]["id"]})
+    pick = await client.post("/auth/select-contact", json={"contact_id": contacts[0]["id"]})
     assert pick.status_code == 200
     client.cookies.set("portal_session", pick.cookies["portal_session"])
 
@@ -112,15 +125,10 @@ async def test_single_contact_auto_selected(client: AsyncClient, admin_headers: 
         )
         await session.commit()
 
-    login = await client.post(
-        "/auth/login",
-        json={"school_name": school_name, "biz_no": biz_no},
-    )
-    assert login.status_code == 200
-    body = login.json()
+    await _login_with_token(client, admin_headers, school_id)
+    body = (await client.get("/auth/me")).json()
     assert body["needs_contact_selection"] is False
     assert body["contact"]["name"] == "박담당"
-    client.cookies.set("portal_session", login.cookies["portal_session"])
 
     accounts = await client.get("/accounts")
     assert accounts.status_code == 200

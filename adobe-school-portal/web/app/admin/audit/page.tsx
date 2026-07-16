@@ -106,7 +106,7 @@ function AdminAuditContent() {
           onChange={(e) => setEmailQ(e.target.value)}
           className="rounded-lg border border-slate-300 px-3 py-2 text-sm sm:col-span-2"
         />
-        <button type="submit" className="rounded-lg bg-slate-900 px-4 py-2 text-sm text-white sm:col-span-4 sm:w-auto sm:justify-self-start">
+        <button type="submit" className="rounded-lg bg-indigo-600 px-4 py-2 text-sm text-white sm:col-span-4 sm:w-auto sm:justify-self-start">
           필터 적용
         </button>
       </form>

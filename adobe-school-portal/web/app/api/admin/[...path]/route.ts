@@ -66,6 +66,13 @@ async function proxy(req: NextRequest, ctx: RouteCtx) {
       { status: 502 },
     );
   }
+  // Node/undici rejects NextResponse(body, { status: 204 }) — pass null body for no-content.
+  if (upstream.status === 204 || upstream.status === 205) {
+    const response = new NextResponse(null, { status: upstream.status });
+    applyUpstreamCookies(upstream, response);
+    return response;
+  }
+
   const resContentType = upstream.headers.get("content-type") || "application/json";
   const payload = await upstream.arrayBuffer();
 

@@ -44,6 +44,11 @@ TEST_SCHOOL_NAME_SQL = or_(
     School.name.like("엑셀출력%"),
     School.name.like("실패삭제%"),
     School.name.like("실패제외%"),
+    School.name.like("SDL테스트학교%"),
+    School.name.like("SDL필터학교%"),
+    School.name.like("SDL엑셀학교%"),
+    School.name.like("AAA SDL%"),
+    School.name.like("ZZZ SDL%"),
 )
 
 # 실제 고유번호와 구분되는 테스트용 biz_no (pytest·수동 테스트)

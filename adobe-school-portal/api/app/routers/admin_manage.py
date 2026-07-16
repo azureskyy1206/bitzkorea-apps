@@ -7,18 +7,21 @@ from pathlib import Path
 import structlog
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
-from sqlalchemy import Integer, and_, cast, case, func, or_, select
+from sqlalchemy import Integer, and_, cast, case, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.license_terms import TERM_META, is_valid_term, term_label
-from app.models import Account, AccountStatus, AuditLog, LicenseQuota, School, SchoolContact
+from app.services.sdl_export import sdl_contact_key
+from app.models import Account, AccountStatus, AuditLog, LicenseQuota, School, SchoolContact, SdlRegistration
 from app.schemas.admin import QuotaOut, SchoolOut
 from app.schemas.admin_manage import (
     AdminAccountSearchItem,
     AdminAccountSearchResponse,
     AdminAuditListResponse,
     AdminAuditOut,
+    AdminContactQuotaOut,
+    AdminContactUpdate,
     AdminOverviewOut,
     AdminSchoolContactOut,
     ImportExcelResponse,
@@ -28,6 +31,9 @@ from app.schemas.admin_manage import (
     SchoolAllocationTermOut,
     SchoolListItem,
     SchoolListResponse,
+    SchoolMailSelectionItem,
+    SchoolMailSelectionResponse,
+    SchoolProfileUpdate,
 )
 from app.services.admin_overview import build_admin_overview
 from app.security.deps import get_db, require_admin_auth
@@ -36,7 +42,12 @@ from app.services.excel_import import (
     run_schools_import,
     save_upload_to_temp,
 )
-from app.services.contact_service import contact_quota_summary, list_school_contacts
+from app.services.contact_service import (
+    contact_quota_summary,
+    get_contact_for_school,
+    list_school_contacts,
+    normalize_contact_name,
+)
 from app.services.named_kpis import refresh_named_kpis_for_term
 from app.services.contact_excel import discover_contact_excel_files, sync_contact_details_from_excel
 from app.services.quota_aggregate import (
@@ -52,6 +63,12 @@ from app.services.usage_accounts_export import (
     usage_accounts_to_xlsx_bytes,
     usage_export_filename,
     usage_export_filename_ascii,
+)
+from app.services.excel_templates import (
+    build_excel_template_xlsx,
+    is_valid_template_key,
+    template_filename,
+    template_filename_ascii,
 )
 
 router = APIRouter(
@@ -82,56 +99,454 @@ async def _ensure_contact_excel_synced(db: AsyncSession) -> None:
     log.info("contact_excel_synced", updated=updated, files=len(paths))
 
 
-def _build_school_list_rows(
-    schools: list[School],
-    alloc_by_contact: dict[tuple[int, int | None], list[dict]],
-    *,
-    reg_filter: set[str],
-    term_codes: list[str] | None,
-) -> list[SchoolListItem]:
-    registration_active = bool(reg_filter) and reg_filter < {"assigned", "unassigned"}
-    rows: list[SchoolListItem] = []
+class _SchoolListSlot:
+    __slots__ = (
+        "school_id",
+        "contact_id",
+        "name",
+        "biz_no",
+        "created_at",
+        "school_contact_email",
+        "contact_name",
+        "contact_phone",
+        "contact_email",
+    )
 
-    for school in schools:
-        contacts = sorted(school.contacts, key=lambda c: c.name)
-        contact_slots: list[SchoolContact | None] = list(contacts) if contacts else [None]
+    def __init__(
+        self,
+        *,
+        school_id: int,
+        contact_id: int | None,
+        name: str,
+        biz_no: str,
+        created_at,
+        school_contact_email: str | None,
+        contact_name: str | None,
+        contact_phone: str | None,
+        contact_email: str | None,
+    ) -> None:
+        self.school_id = school_id
+        self.contact_id = contact_id
+        self.name = name
+        self.biz_no = biz_no
+        self.created_at = created_at
+        self.school_contact_email = school_contact_email
+        self.contact_name = contact_name
+        self.contact_phone = contact_phone
+        self.contact_email = contact_email
 
-        for contact in contact_slots:
-            cid = contact.id if contact else None
-            alloc_raw = alloc_by_contact.get((school.id, cid), [])
-            if registration_active and not school_matches_registration_filter(
-                alloc_raw,
-                contract_terms=term_codes,
-                registration=reg_filter,
-            ):
-                continue
 
-            allocations = [SchoolAllocationTermOut(**row) for row in alloc_raw]
-            allocation_total = sum(a.seats_total for a in allocations)
-            email = None
-            if contact and contact.email and contact.email.strip():
-                email = contact.email.strip()
-            elif not contact and school.contact_email and school.contact_email.strip():
-                email = school.contact_email.strip()
+def _slot_contact_key(slot: _SchoolListSlot) -> tuple[str | None, str | None, str | None]:
+    return sdl_contact_key(slot.contact_name, slot.contact_phone, slot.contact_email)
 
-            rows.append(
-                SchoolListItem(
-                    school_id=school.id,
-                    contact_id=cid,
-                    name=school.name,
-                    biz_no=school.biz_no,
-                    contact_name=contact.name if contact else None,
-                    contact_phone=contact.phone if contact else None,
-                    contact_email=email,
-                    created_at=school.created_at,
-                    quotas=[QuotaOut.model_validate(q) for q in school.license_quotas],
-                    allocations=allocations,
-                    allocation_total=allocation_total,
+
+def _school_list_search_condition(q: str):
+    term = f"%{q.strip()}%"
+    return or_(
+        School.name.ilike(term),
+        School.biz_no.ilike(term),
+        exists(
+            select(1)
+            .select_from(SdlRegistration)
+            .where(
+                SdlRegistration.school_id == School.id,
+                or_(
+                    SdlRegistration.contact_name.ilike(term),
+                    SdlRegistration.contact_phone.ilike(term),
+                    SdlRegistration.contact_email.ilike(term),
+                    SdlRegistration.registered_ip.ilike(term),
+                ),
+            )
+        ),
+    )
+
+
+async def _sdl_only_slots_for_schools(
+    db: AsyncSession,
+    school_ids: list[int],
+    existing_keys: set[tuple[int, tuple[str | None, str | None, str | None]]],
+) -> dict[int, list[_SchoolListSlot]]:
+    if not school_ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(
+                SdlRegistration.school_id,
+                SdlRegistration.contact_name,
+                SdlRegistration.contact_phone,
+                SdlRegistration.contact_email,
+                School.name,
+                School.biz_no,
+                School.created_at,
+                School.contact_email,
+            )
+            .join(School, School.id == SdlRegistration.school_id)
+            .where(SdlRegistration.school_id.in_(school_ids))
+        )
+    ).all()
+    seen = set(existing_keys)
+    extras: dict[int, list[_SchoolListSlot]] = {}
+    for sid, cname, cphone, cemail, sname, biz, created, school_email in rows:
+        sid_int = int(sid)
+        ck = sdl_contact_key(cname, cphone, cemail)
+        pair = (sid_int, ck)
+        if pair in seen:
+            continue
+        seen.add(pair)
+        extras.setdefault(sid_int, []).append(
+            _SchoolListSlot(
+                school_id=sid_int,
+                contact_id=None,
+                name=sname,
+                biz_no=biz,
+                created_at=created,
+                school_contact_email=school_email,
+                contact_name=ck[0],
+                contact_phone=ck[1],
+                contact_email=ck[2],
+            )
+        )
+    return extras
+
+
+async def _flatten_merged_school_list_slots(
+    db: AsyncSession, school_ids: list[int]
+) -> list[_SchoolListSlot]:
+    """Named 담당자 행 + SDL에만 있는 담당자 행."""
+    if not school_ids:
+        return []
+    base = await _fetch_school_list_slots(db, school_ids)
+    existing_keys = {(s.school_id, _slot_contact_key(s)) for s in base}
+    extras_by_school = await _sdl_only_slots_for_schools(db, school_ids, existing_keys)
+    by_school: dict[int, list[_SchoolListSlot]] = {}
+    for s in base:
+        by_school.setdefault(s.school_id, []).append(s)
+    out: list[_SchoolListSlot] = []
+    for sid in school_ids:
+        out.extend(by_school.get(sid, []))
+        out.extend(extras_by_school.get(sid, []))
+    return out
+
+
+async def _fetch_sdl_match_keys(
+    db: AsyncSession, school_ids: list[int]
+) -> set[tuple[int, tuple[str | None, str | None, str | None]]]:
+    if not school_ids:
+        return set()
+    rows = (
+        await db.execute(
+            select(
+                SdlRegistration.school_id,
+                SdlRegistration.contact_name,
+                SdlRegistration.contact_phone,
+                SdlRegistration.contact_email,
+            ).where(SdlRegistration.school_id.in_(school_ids))
+        )
+    ).all()
+    return {
+        (int(sid), sdl_contact_key(cname, cphone, cemail))
+        for sid, cname, cphone, cemail in rows
+    }
+
+
+async def _count_school_list_slots(db: AsyncSession, conditions: list) -> int:
+    """학교·담당자 조인 행 수(담당자 없으면 학교당 1행)."""
+    stmt = (
+        select(func.count())
+        .select_from(School)
+        .outerjoin(SchoolContact, SchoolContact.school_id == School.id)
+    )
+    if conditions:
+        stmt = stmt.where(*conditions)
+    return int((await db.execute(stmt)).scalar_one())
+
+
+def _rows_to_school_list_slots(rows: list) -> list[_SchoolListSlot]:
+    slots: list[_SchoolListSlot] = []
+    for sid, sname, biz, created, school_email, cid, cname, cphone, cemail in rows:
+        school_email_clean = school_email.strip() if school_email and school_email.strip() else None
+        email = cemail.strip() if cemail and cemail.strip() else None
+        if cid is None:
+            slots.append(
+                _SchoolListSlot(
+                    school_id=int(sid),
+                    contact_id=None,
+                    name=sname,
+                    biz_no=biz,
+                    created_at=created,
+                    school_contact_email=school_email_clean,
+                    contact_name=None,
+                    contact_phone=None,
+                    contact_email=school_email_clean,
                 )
             )
+        else:
+            slots.append(
+                _SchoolListSlot(
+                    school_id=int(sid),
+                    contact_id=int(cid),
+                    name=sname,
+                    biz_no=biz,
+                    created_at=created,
+                    school_contact_email=school_email,
+                    contact_name=cname,
+                    contact_phone=cphone,
+                    contact_email=email,
+                )
+            )
+    return slots
 
-    rows.sort(key=lambda r: (r.name, r.contact_name or ""))
-    return rows
+
+async def _fetch_school_list_slots_paginated(
+    db: AsyncSession,
+    *,
+    conditions: list,
+    offset: int,
+    limit: int,
+) -> list[_SchoolListSlot]:
+    """담당자 1명당 1행 — DB에서 페이지만 조회."""
+    rn = func.row_number().over(
+        order_by=(
+            School.name.asc(),
+            SchoolContact.name.asc().nulls_first(),
+            SchoolContact.id.asc().nulls_first(),
+        )
+    ).label("rn")
+    base = (
+        select(
+            School.id.label("school_id"),
+            School.name.label("school_name"),
+            School.biz_no.label("biz_no"),
+            School.created_at.label("created_at"),
+            School.contact_email.label("school_contact_email"),
+            SchoolContact.id.label("contact_id"),
+            SchoolContact.name.label("contact_name"),
+            SchoolContact.phone.label("contact_phone"),
+            SchoolContact.email.label("contact_email"),
+            rn,
+        )
+        .select_from(School)
+        .outerjoin(SchoolContact, SchoolContact.school_id == School.id)
+    )
+    if conditions:
+        base = base.where(*conditions)
+    sq = base.subquery()
+    rows = (
+        await db.execute(
+            select(
+                sq.c.school_id,
+                sq.c.school_name,
+                sq.c.biz_no,
+                sq.c.created_at,
+                sq.c.school_contact_email,
+                sq.c.contact_id,
+                sq.c.contact_name,
+                sq.c.contact_phone,
+                sq.c.contact_email,
+            ).where(sq.c.rn > offset, sq.c.rn <= offset + limit)
+        )
+    ).all()
+    return _rows_to_school_list_slots(rows)
+
+
+async def _fetch_school_list_slots(db: AsyncSession, school_ids: list[int]) -> list[_SchoolListSlot]:
+    """담당자 1명당 1행 — 학교·담당자 메타만 조회(할당 집계 제외)."""
+    if not school_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(
+                School.id,
+                School.name,
+                School.biz_no,
+                School.created_at,
+                School.contact_email,
+                SchoolContact.id,
+                SchoolContact.name,
+                SchoolContact.phone,
+                SchoolContact.email,
+            )
+            .outerjoin(SchoolContact, SchoolContact.school_id == School.id)
+            .where(School.id.in_(school_ids))
+        )
+    ).all()
+
+    contacts_by_school: dict[int, list[tuple[int, str | None, str | None, str | None]]] = {}
+    school_meta: dict[int, tuple[str, str, object, str | None]] = {}
+    for sid, sname, biz, created, school_email, cid, cname, cphone, cemail in rows:
+        sid_int = int(sid)
+        school_meta[sid_int] = (sname, biz, created, school_email)
+        if cid is not None:
+            contacts_by_school.setdefault(sid_int, []).append(
+                (int(cid), cname, cphone, cemail),
+            )
+
+    slots: list[_SchoolListSlot] = []
+    for sid in school_ids:
+        if sid not in school_meta:
+            continue
+        sname, biz, created, school_email = school_meta[sid]
+        contacts = sorted(contacts_by_school.get(sid, []), key=lambda c: c[1] or "")
+        if not contacts:
+            school_email_clean = school_email.strip() if school_email and school_email.strip() else None
+            slots.append(
+                _SchoolListSlot(
+                    school_id=sid,
+                    contact_id=None,
+                    name=sname,
+                    biz_no=biz,
+                    created_at=created,
+                    school_contact_email=school_email_clean,
+                    contact_name=None,
+                    contact_phone=None,
+                    contact_email=school_email_clean,
+                )
+            )
+            continue
+        for cid, cname, cphone, cemail in contacts:
+            email = cemail.strip() if cemail and cemail.strip() else None
+            slots.append(
+                _SchoolListSlot(
+                    school_id=sid,
+                    contact_id=cid,
+                    name=sname,
+                    biz_no=biz,
+                    created_at=created,
+                    school_contact_email=school_email,
+                    contact_name=cname,
+                    contact_phone=cphone,
+                    contact_email=email,
+                )
+            )
+    return slots
+
+
+async def _school_contact_pairs_ordered(
+    db: AsyncSession, school_ids: list[int]
+) -> list[tuple[int, int | None]]:
+    """학교·담당자 슬롯 키만 (담당자 1명당 1행, 정렬 유지)."""
+    if not school_ids:
+        return []
+    rows = (
+        await db.execute(
+            select(School.id, SchoolContact.id)
+            .outerjoin(SchoolContact, SchoolContact.school_id == School.id)
+            .where(School.id.in_(school_ids))
+            .order_by(School.name.asc(), SchoolContact.name.asc().nulls_first(), SchoolContact.id.asc().nulls_first())
+        )
+    ).all()
+    contacts_by_school: dict[int, list[int]] = {}
+    school_order: list[int] = []
+    seen_schools: set[int] = set()
+    for sid, cid in rows:
+        sid_int = int(sid)
+        if sid_int not in seen_schools:
+            seen_schools.add(sid_int)
+            school_order.append(sid_int)
+        if cid is not None:
+            contacts_by_school.setdefault(sid_int, []).append(int(cid))
+
+    pairs: list[tuple[int, int | None]] = []
+    for sid in school_ids:
+        if sid not in seen_schools:
+            continue
+        contacts = contacts_by_school.get(sid, [])
+        if not contacts:
+            pairs.append((sid, None))
+        else:
+            for cid in contacts:
+                pairs.append((sid, cid))
+    return pairs
+
+
+def _slots_for_pairs(
+    slots: list[_SchoolListSlot], pairs: list[tuple[int, int | None]]
+) -> list[_SchoolListSlot]:
+    by_pair = {(s.school_id, s.contact_id): s for s in slots}
+    return [by_pair[p] for p in pairs if p in by_pair]
+
+
+def _slot_to_list_item(
+    slot: _SchoolListSlot,
+    alloc_by_contact: dict[tuple[int, int | None], list[dict]],
+    sdl_match_keys: set[tuple[int, tuple[str | None, str | None, str | None]]],
+) -> SchoolListItem:
+    alloc_raw = alloc_by_contact.get((slot.school_id, slot.contact_id), [])
+    allocations = [SchoolAllocationTermOut(**row) for row in alloc_raw]
+    allocation_total = sum(a.seats_total for a in allocations)
+    email = slot.contact_email
+    if not email and slot.contact_id is None:
+        email = slot.school_contact_email
+    return SchoolListItem(
+        school_id=slot.school_id,
+        contact_id=slot.contact_id,
+        name=slot.name,
+        biz_no=slot.biz_no,
+        sdl=(slot.school_id, _slot_contact_key(slot)) in sdl_match_keys,
+        contact_name=slot.contact_name,
+        contact_phone=slot.contact_phone,
+        contact_email=email,
+        created_at=slot.created_at,
+        quotas=[],
+        allocations=allocations,
+        allocation_total=allocation_total,
+    )
+
+
+def _slot_has_mailable_email(slot: _SchoolListSlot) -> bool:
+    email = slot.contact_email
+    if not email and slot.contact_id is None:
+        email = slot.school_contact_email
+    return bool(email and str(email).strip())
+
+
+MAIL_SELECTION_MAX = 5000
+
+
+def _filter_slots_by_sdl_contacts(
+    slots: list[_SchoolListSlot],
+    sdl_match_keys: set[tuple[int, tuple[str | None, str | None, str | None]]],
+) -> list[_SchoolListSlot]:
+    """SDL만 필터: 해당 학교의 SDL 담당자 행만 (Named-only 담당자 제외)."""
+    return [s for s in slots if (s.school_id, _slot_contact_key(s)) in sdl_match_keys]
+
+
+async def _fetch_all_school_list_slots(
+    db: AsyncSession,
+    *,
+    conditions: list,
+    reg_filter: set[str],
+    term_codes: list[str] | None,
+    registration_active: bool,
+    sdl: bool | None = None,
+) -> list[_SchoolListSlot]:
+    list_stmt = select(School.id)
+    if conditions:
+        list_stmt = list_stmt.where(*conditions)
+    id_rows = await db.execute(list_stmt.order_by(School.name.asc()))
+    all_ids = [int(r[0]) for r in id_rows.all()]
+    if not all_ids:
+        return []
+
+    all_slots = await _flatten_merged_school_list_slots(db, all_ids)
+    if sdl is True:
+        sdl_keys = await _fetch_sdl_match_keys(db, all_ids)
+        all_slots = _filter_slots_by_sdl_contacts(all_slots, sdl_keys)
+
+    term_filter_active = bool(term_codes)
+    if not term_filter_active and not registration_active:
+        return all_slots
+
+    alloc_by_contact = await batch_contact_allocations_summary(db, all_ids)
+    return [
+        slot
+        for slot in all_slots
+        if school_matches_registration_filter(
+            alloc_by_contact.get((slot.school_id, slot.contact_id), []),
+            contract_terms=term_codes if term_filter_active else None,
+            registration=reg_filter,
+        )
+    ]
 
 
 @router.get("/export/usage-accounts")
@@ -152,6 +567,24 @@ async def export_usage_accounts(
             "Content-Disposition": content_disposition_attachment(
                 filename,
                 ascii_fallback=usage_export_filename_ascii(contract_term),
+            ),
+        },
+    )
+
+
+@router.get("/excel-templates/{template_key}")
+async def download_excel_template(template_key: str):
+    """업로드·다운로드용 엑셀 양식 (헤더 + 예시 행)."""
+    if not is_valid_template_key(template_key):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="알 수 없는 양식입니다.")
+    filename = template_filename(template_key)
+    return Response(
+        content=build_excel_template_xlsx(template_key),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": content_disposition_attachment(
+                filename,
+                ascii_fallback=template_filename_ascii(template_key),
             ),
         },
     )
@@ -281,12 +714,19 @@ async def list_schools(
         default=None,
         description="assigned=등록≥1, unassigned=등록0. 쉼표로 복수 지정 가능",
     ),
+    sdl: bool | None = Query(
+        default=None,
+        description="SDL 등록 여부로 필터. true=SDL 담당자 행만, false=SDL 없는 학교",
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     conditions = []
     if q and q.strip():
-        term = f"%{q.strip()}%"
-        conditions.append(or_(School.name.ilike(term), School.biz_no.ilike(term)))
+        conditions.append(_school_list_search_condition(q))
+    if sdl is True:
+        conditions.append(exists(select(1).where(SdlRegistration.school_id == School.id)))
+    elif sdl is False:
+        conditions.append(~exists(select(1).where(SdlRegistration.school_id == School.id)))
 
     reg_filter = _parse_registration_filter(registration)
     term_codes = _parse_contract_terms_filter(contract_terms)
@@ -294,37 +734,84 @@ async def list_schools(
         if not is_valid_term(code):
             raise HTTPException(status_code=400, detail=f"알 수 없는 계약 기간: {code}")
 
-    list_stmt = select(School)
-    if conditions:
-        list_stmt = list_stmt.where(*conditions)
+    registration_active = bool(reg_filter) and reg_filter < {"assigned", "unassigned"}
+    offset = (page - 1) * limit
 
-    id_rows = await db.execute(list_stmt.order_by(School.name).with_only_columns(School.id))
-    all_ids = [int(r[0]) for r in id_rows.all()]
-    if not all_ids:
-        return SchoolListResponse(items=[], total=0, page=page, limit=limit)
-
-    result = await db.execute(
-        select(School)
-        .where(School.id.in_(all_ids))
-        .options(
-            selectinload(School.license_quotas),
-            selectinload(School.contacts),
-        )
-    )
-    by_id = {s.id: s for s in result.scalars().all()}
-    schools = [by_id[i] for i in all_ids if i in by_id]
-
-    alloc_by_contact = await batch_contact_allocations_summary(db, all_ids)
-    flat_rows = _build_school_list_rows(
-        schools,
-        alloc_by_contact,
+    all_slots = await _fetch_all_school_list_slots(
+        db,
+        conditions=conditions,
         reg_filter=reg_filter,
         term_codes=term_codes,
+        registration_active=registration_active,
+        sdl=sdl,
     )
-    total = len(flat_rows)
-    offset = (page - 1) * limit
-    items = flat_rows[offset : offset + limit]
+    total = len(all_slots)
+    page_slots = all_slots[offset : offset + limit]
+    page_school_ids = list({slot.school_id for slot in page_slots})
+    sdl_keys = await _fetch_sdl_match_keys(db, page_school_ids)
+    alloc_by_contact = await batch_contact_allocations_summary(db, page_school_ids)
+    items = [_slot_to_list_item(slot, alloc_by_contact, sdl_keys) for slot in page_slots]
     return SchoolListResponse(items=items, total=total, page=page, limit=limit)
+
+
+@router.get("/schools/mail-selection", response_model=SchoolMailSelectionResponse)
+async def list_schools_mail_selection(
+    q: str | None = Query(default=None, max_length=100),
+    contract_terms: str | None = Query(
+        default=None,
+        description="등록 필터·집계에 쓸 기간(쉼표 구분). 예: CY25-H2,CY26-H1",
+    ),
+    registration: str | None = Query(
+        default=None,
+        description="assigned=등록≥1, unassigned=등록0. 쉼표로 복수 지정 가능",
+    ),
+    sdl: bool | None = Query(
+        default=None,
+        description="SDL 등록 여부로 필터. true=SDL 담당자 행만, false=SDL 없는 학교",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """현재 필터에 맞는 이메일 발송 가능 담당자 전체(페이지 무관)."""
+    conditions = []
+    if q and q.strip():
+        conditions.append(_school_list_search_condition(q))
+    if sdl is True:
+        conditions.append(exists(select(1).where(SdlRegistration.school_id == School.id)))
+    elif sdl is False:
+        conditions.append(~exists(select(1).where(SdlRegistration.school_id == School.id)))
+
+    reg_filter = _parse_registration_filter(registration)
+    term_codes = _parse_contract_terms_filter(contract_terms)
+    for code in term_codes or []:
+        if not is_valid_term(code):
+            raise HTTPException(status_code=400, detail=f"알 수 없는 계약 기간: {code}")
+
+    registration_active = bool(reg_filter) and reg_filter < {"assigned", "unassigned"}
+    all_slots = await _fetch_all_school_list_slots(
+        db,
+        conditions=conditions,
+        reg_filter=reg_filter,
+        term_codes=term_codes,
+        registration_active=registration_active,
+        sdl=sdl,
+    )
+    items = [
+        SchoolMailSelectionItem(
+            school_id=slot.school_id,
+            contact_id=slot.contact_id,
+            contact_name=slot.contact_name,
+            contact_phone=slot.contact_phone,
+            contact_email=slot.contact_email,
+        )
+        for slot in all_slots
+        if _slot_has_mailable_email(slot)
+    ]
+    if len(items) > MAIL_SELECTION_MAX:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"선택 가능한 항목이 {MAIL_SELECTION_MAX}건을 초과합니다. 필터를 좁혀 주세요.",
+        )
+    return SchoolMailSelectionResponse(items=items, total=len(items))
 
 
 @router.get("/schools/{school_id}", response_model=SchoolDetailOut)
@@ -350,7 +837,7 @@ async def get_school_detail(school_id: int, db: AsyncSession = Depends(get_db)):
                 name=c.name,
                 phone=c.phone,
                 email=c.email,
-                quotas=quotas_raw,
+                quotas=[AdminContactQuotaOut(**q) for q in quotas_raw],
             )
         )
 
@@ -365,6 +852,57 @@ async def get_school_detail(school_id: int, db: AsyncSession = Depends(get_db)):
         allocation_total=allocation_total,
         account_counts=counts,
         contacts=contacts_out,
+    )
+
+
+@router.patch("/schools/{school_id}", response_model=SchoolOut)
+async def update_school_profile(
+    school_id: int,
+    body: SchoolProfileUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    school = await db.get(School, school_id)
+    if school is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="학교를 찾을 수 없습니다.")
+    if body.contact_email is not None:
+        school.contact_email = body.contact_email.strip() or None
+    await db.commit()
+    await db.refresh(school)
+    log.info("school_profile_updated", school_id=school_id)
+    return SchoolOut.model_validate(school)
+
+
+@router.patch("/schools/{school_id}/contacts/{contact_id}", response_model=AdminSchoolContactOut)
+async def update_school_contact(
+    school_id: int,
+    contact_id: int,
+    body: AdminContactUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    contact = await get_contact_for_school(db, school_id, contact_id)
+    if contact is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="담당자를 찾을 수 없습니다.")
+
+    if body.name is not None:
+        norm = normalize_contact_name(body.name)
+        if not norm:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="담당자 이름을 입력하세요.")
+        contact.name = norm
+    if body.phone is not None:
+        contact.phone = body.phone.strip() or None
+    if body.email is not None:
+        contact.email = body.email.strip().lower() or None
+
+    await db.commit()
+    await db.refresh(contact)
+    quotas_raw = await contact_quota_summary(db, contact.id)
+    log.info("school_contact_updated", school_id=school_id, contact_id=contact_id)
+    return AdminSchoolContactOut(
+        id=contact.id,
+        name=contact.name,
+        phone=contact.phone,
+        email=contact.email,
+        quotas=[AdminContactQuotaOut(**q) for q in quotas_raw],
     )
 
 

@@ -50,6 +50,24 @@ def school_names_match(stored: str, provided: str) -> bool:
     return normalize_school_name(stored) == normalize_school_name(provided)
 
 
+# 엑셀·Named 구 명칭 → 포털 정식 학교명 (개명 반영)
+_NAMED_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "한양공업고등학교": ("한양과학기술고등학교",),
+}
+
+
+def _named_match_keys(name: str) -> tuple[str, ...]:
+    n = normalize_school_name(name)
+    keys = {n, name}
+    for src, aliases in _NAMED_KEY_ALIASES.items():
+        src_n = normalize_school_name(src)
+        alias_ns = {normalize_school_name(a) for a in aliases}
+        if n == src_n or n in alias_ns:
+            keys.add(src)
+            keys.update(aliases)
+    return tuple(keys)
+
+
 def school_names_match_loose(stored: str, provided: str) -> bool:
     """Named 통합명 ↔ 포털 …1/…2 분할명 (Import·대조용)."""
     a = normalize_school_name(stored)
@@ -70,10 +88,21 @@ def school_quota_suffix_rank(name: str) -> int:
     return suf if suf is not None else 99
 
 
+def is_attached_kindergarten_name(name: str) -> bool:
+    """병설유치원 — 동일 사업자번호의 본교(초·중·고)와 별도 학교로 취급."""
+    return "병설유치원" in normalize_school_name(name)
+
+
 def school_attached_kindergarten_rank(name: str) -> int:
     """병설유치원명은 동일 사업자번호의 초등학교명보다 후순위."""
-    n = normalize_school_name(name)
-    return 1 if "병설유치원" in n else 0
+    return 1 if is_attached_kindergarten_name(name) else 0
+
+
+def import_same_school_unit(stored_name: str, import_name: str) -> bool:
+    """Import·biz_no 병합: 분할 접미사(…1/2) 또는 병설유치원 여부가 같을 때만 동일 학교."""
+    if is_attached_kindergarten_name(stored_name) != is_attached_kindergarten_name(import_name):
+        return False
+    return school_names_match_loose(stored_name, import_name)
 
 
 def pick_canonical_school(schools: Sequence[School]) -> School:
@@ -95,7 +124,12 @@ def find_schools_matching_named_key(
     schools: Sequence[School],
     named_key: str,
 ) -> list[School]:
-    matches = [s for s in schools if school_names_match_loose(s.name, named_key)]
+    keys = _named_match_keys(named_key)
+    matches = [
+        s
+        for s in schools
+        if any(school_names_match_loose(s.name, k) for k in keys)
+    ]
     return sorted(matches, key=lambda s: (school_quota_suffix_rank(s.name), s.id))
 
 
@@ -103,10 +137,18 @@ def find_canonical_school_for_named_key(
     schools: Sequence[School],
     named_key: str,
 ) -> School | None:
-    """Named 키에 맞는 학교 1개 (동일 사업자번호·분할명 통합 후)."""
+    """Named 키에 맞는 학교 1개 (느슨한 학교명·분할명 통합). 병설유치원은 본교와 합치지 않음."""
     matches = find_schools_matching_named_key(schools, named_key)
     if not matches:
         return None
+    if is_attached_kindergarten_name(named_key):
+        attached = [s for s in matches if is_attached_kindergarten_name(s.name)]
+        if attached:
+            return pick_canonical_school(attached)
+        return None
+    non_attached = [s for s in matches if not is_attached_kindergarten_name(s.name)]
+    if non_attached:
+        matches = non_attached
     if len(matches) == 1:
         return matches[0]
     by_biz: dict[str, list[School]] = {}
@@ -117,31 +159,3 @@ def find_canonical_school_for_named_key(
     if len(by_biz) == 1:
         return pick_canonical_school(next(iter(by_biz.values())))
     return pick_canonical_school(matches)
-
-
-def distribute_emails_by_quota_cap(
-    emails: list[str],
-    schools: Sequence[School],
-    seats_cap: dict[int, int],
-) -> dict[int, list[str]]:
-    """분할 학교에 seats_total 비율로 이메일 배분. 초과분은 마지막 학교에."""
-    if not schools:
-        return {}
-    if len(schools) == 1:
-        return {schools[0].id: list(emails)}
-
-    ordered = sorted(schools, key=lambda s: (school_quota_suffix_rank(s.name), s.id))
-    out: dict[int, list[str]] = {s.id: [] for s in ordered}
-    remaining = list(emails)
-    for s in ordered:
-        if not remaining:
-            break
-        cap = seats_cap.get(s.id, 0)
-        if cap <= 0:
-            cap = len(remaining)
-        chunk = remaining[:cap]
-        out[s.id] = chunk
-        remaining = remaining[cap:]
-    if remaining:
-        out[ordered[-1].id].extend(remaining)
-    return out

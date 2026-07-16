@@ -1,12 +1,15 @@
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select
+from fastapi.responses import Response
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Account, AccountStatus
+from app.models import Account, AccountStatus, School, SchoolContact
 from app.schemas.accounts import (
     AccountBulkCreate,
     AccountBulkDelete,
+    AccountBulkDeleteByText,
+    AccountBulkDeleteByTextResponse,
     AccountBulkDeleteResponse,
     AccountBulkItemResult,
     AccountBulkResponse,
@@ -18,22 +21,29 @@ from app.schemas.accounts import (
 from app.services.school_account_ops import (
     account_to_out,
     bulk_delete_school_accounts,
+    bulk_delete_school_accounts_by_text,
     delete_school_account,
+    list_school_accounts,
 )
 from app.security.deps import get_contract_term, get_current_school_id, get_db_rls, require_contact_scope
 from app.services.account_register import AccountRegisterError, register_account
 from app.services.audit_service import write_audit
+from app.services.contact_accounts_export import (
+    build_contact_accounts_export_rows,
+    contact_accounts_export_filename,
+    contact_accounts_export_filename_ascii,
+    contact_accounts_to_xlsx_bytes,
+)
 from app.services.email_parse import parse_emails_from_text
 from app.services.email_validate import normalize_email
 from app.services.quota import (
     account_belongs_to_contact_scope,
-    account_contact_scope,
-    count_seats_in_use,
     ensure_seat_available,
     ensure_seats_available,
     refresh_seats_used,
 )
 from app.services.sync_enqueue import enqueue
+from app.services.usage_accounts_export import content_disposition_attachment
 from app.models.sync_queue import SyncOp
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
@@ -47,34 +57,72 @@ BULK_MAX_DELETE = 100
 async def list_accounts(
     page: int = Query(1, ge=1),
     limit: int = Query(50, ge=1, le=200),
+    q: str | None = Query(default=None, max_length=320, description="이메일 부분 검색"),
     school_id: int = Depends(get_current_school_id),
     contact_id: int | None = Depends(require_contact_scope),
     contract_term: str = Depends(get_contract_term),
     db: AsyncSession = Depends(get_db_rls),
 ):
-    offset = (page - 1) * limit
-    filt = (
-        (Account.school_id == school_id)
-        & (Account.contract_term == contract_term)
-        & (Account.status != AccountStatus.removed)
-        & (await account_contact_scope(db, school_id, contact_id))
-    )
-    total_result = await db.execute(select(func.count()).select_from(Account).where(filt))
-    total = int(total_result.scalar_one())
-
-    result = await db.execute(
-        select(Account).where(filt).order_by(Account.created_at.desc()).offset(offset).limit(limit)
-    )
-    items = result.scalars().all()
-    in_use = await count_seats_in_use(
-        db, school_id, contract_term, contact_id=contact_id
-    )
-    return AccountListResponse(
-        items=[AccountOut.model_validate(a) for a in items],
-        total=total,
-        in_use=in_use,
+    email_q: str | None = None
+    if q is not None:
+        term = q.strip()
+        if term:
+            if "@" not in term and len(term) < 2:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="이메일 검색은 2자 이상이거나 @를 포함해 주세요.",
+                )
+            email_q = term
+    return await list_school_accounts(
+        db,
+        school_id=school_id,
+        contract_term=contract_term,
+        contact_id=contact_id,
+        scope_all_contacts=False,
         page=page,
         limit=limit,
+        email_q=email_q,
+    )
+
+
+@router.get("/export")
+async def export_contact_accounts(
+    school_id: int = Depends(get_current_school_id),
+    contact_id: int | None = Depends(require_contact_scope),
+    contract_term: str = Depends(get_contract_term),
+    db: AsyncSession = Depends(get_db_rls),
+):
+    """담당자 본인 할당 계정 목록 엑셀 (할당 수량만큼 행, 미등록 슬롯은 공백)."""
+    school = await db.get(School, school_id)
+    if school is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="학교를 찾을 수 없습니다.")
+
+    contact_name: str | None = None
+    if contact_id is not None:
+        contact = await db.get(SchoolContact, contact_id)
+        contact_name = contact.name if contact else None
+
+    rows = await build_contact_accounts_export_rows(
+        db,
+        school_id=school_id,
+        contact_id=contact_id,
+        contract_term=contract_term,
+    )
+    content = contact_accounts_to_xlsx_bytes(rows)
+    filename = contact_accounts_export_filename(
+        school_name=school.name,
+        contact_name=contact_name,
+        contract_term=contract_term,
+    )
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": content_disposition_attachment(
+                filename,
+                ascii_fallback=contact_accounts_export_filename_ascii(contract_term),
+            ),
+        },
     )
 
 
@@ -296,6 +344,30 @@ async def delete_accounts_bulk(
             school_id=school_id,
             contract_term=contract_term,
             account_ids=body.account_ids,
+            contact_id=contact_id,
+            scope_all_contacts=False,
+            actor=ACTOR,
+        )
+        await db.commit()
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+
+
+@router.post("/bulk-delete-by-text", response_model=AccountBulkDeleteByTextResponse)
+async def delete_accounts_bulk_by_text(
+    body: AccountBulkDeleteByText,
+    school_id: int = Depends(get_current_school_id),
+    contact_id: int | None = Depends(require_contact_scope),
+    contract_term: str = Depends(get_contract_term),
+    db: AsyncSession = Depends(get_db_rls),
+):
+    try:
+        result = await bulk_delete_school_accounts_by_text(
+            db,
+            school_id=school_id,
+            contract_term=contract_term,
+            text=body.text,
             contact_id=contact_id,
             scope_all_contacts=False,
             actor=ACTOR,
