@@ -330,8 +330,18 @@ async def sso_login(
         db.add(school)
         await db.flush()
 
-    # 6) 담당자 get-or-create (담당자별 분리) + 연락처 보강
     await set_current_school_id(db, school.id)
+
+    # 관리자 조회용 진입(admin_view): 담당자·quota를 만들지 않는다(유령 방지).
+    # 학교 스코프 세션(contact_id=None)으로 실제 데이터만 열람 — 단일 담당자는 /me가 자동 선택.
+    if payload.get("admin_view"):
+        await db.commit()
+        resp = RedirectResponse(url=f"{settings.portal_public_url}/dashboard", status_code=302)
+        _set_session_cookie(resp, school.id, None)
+        log.info("sso_admin_view", school_id=school.id, biz_no=biz_no)
+        return resp
+
+    # 6) 담당자 get-or-create (담당자별 분리) + 연락처 보강
     contact = await get_or_create_contact(db, school.id, contact_name)
     email = (contact_info.get("email") or "").strip() or None
     phone = (contact_info.get("phone") or "").strip() or None
