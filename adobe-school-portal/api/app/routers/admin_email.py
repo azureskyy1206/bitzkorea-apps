@@ -17,9 +17,10 @@ from app.schemas.email import (
     SendLoginGuideIn,
     SendLoginGuideOut,
     SendLoginGuideRowOut,
+    SendMailIn,
 )
 from app.security.deps import get_db, require_admin_auth
-from app.services.graph_email_service import email_is_configured
+from app.services.graph_email_service import email_is_configured, send_mail
 from app.services.login_guide_email import (
     PLACEHOLDER_HINT,
     SendLoginGuideItem,
@@ -157,3 +158,13 @@ async def send_login_guide(
             for r in result.rows
         ],
     )
+
+
+@router.post("/send", status_code=status.HTTP_204_NO_CONTENT)
+async def send_single_mail(body: SendMailIn):
+    """단건 메일 발송 — school.bitzkorea.com 임시 비밀번호 안내용 (X-Admin-Api-Key)."""
+    try:
+        await send_mail(to=body.to, subject=body.subject, body_html=body.body_html, body_text="")
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    log.info("single_mail_sent", to=body.to, subject=body.subject)

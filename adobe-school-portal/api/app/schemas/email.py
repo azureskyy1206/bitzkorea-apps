@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, EmailStr, Field
 
 
 class EmailTemplateOut(BaseModel):
@@ -65,3 +65,11 @@ class EmailConfigStatusOut(BaseModel):
     mail_from: str | None
     mail_from_user_id: str | None
     portal_url: str
+
+
+class SendMailIn(BaseModel):
+    """형제 사이트(school.bitzkorea.com)가 포탈 발신 사서함으로 보내는 단건 메일."""
+
+    to: EmailStr
+    subject: str = Field(..., min_length=1, max_length=200)
+    body_html: str = Field(..., min_length=1, max_length=20000)
