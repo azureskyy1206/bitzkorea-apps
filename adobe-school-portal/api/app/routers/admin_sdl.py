@@ -338,6 +338,21 @@ async def delete_sdl_registration(sdl_id: int, db: AsyncSession = Depends(get_db
     row = await db.get(SdlRegistration, sdl_id)
     if row is None:
         raise HTTPException(status_code=404, detail="SDL 등록을 찾을 수 없습니다.")
+    if row.purchase_qty:
+        # 수량은 학교 단위 — IP만 지우고 수량은 남은 IP 행으로 넘겨 학교 합계를 유지한다.
+        heir = (
+            await db.execute(
+                select(SdlRegistration)
+                .where(
+                    SdlRegistration.school_id == row.school_id,
+                    SdlRegistration.id != sdl_id,
+                )
+                .order_by(SdlRegistration.id.asc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if heir is not None:
+            heir.purchase_qty += row.purchase_qty
     await db.delete(row)
     await db.commit()
 

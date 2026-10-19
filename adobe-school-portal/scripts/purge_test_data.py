@@ -47,6 +47,7 @@ TEST_SCHOOL_NAME_SQL = or_(
     School.name.like("SDL테스트학교%"),
     School.name.like("SDL필터학교%"),
     School.name.like("SDL엑셀학교%"),
+    School.name.like("SDL수량학교%"),
     School.name.like("AAA SDL%"),
     School.name.like("ZZZ SDL%"),
 )

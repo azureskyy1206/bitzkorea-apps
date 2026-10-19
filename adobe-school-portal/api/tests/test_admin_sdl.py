@@ -199,3 +199,38 @@ async def test_admin_sdl_grouped_sort_and_export(client: AsyncClient, admin_head
     bare_row = [r for r in aaa_rows if not r[1]]
     assert len(bare_row) == 1
     assert bare_row[0][4] == "10.1.0.1"
+
+
+@pytest.mark.asyncio
+async def test_delete_ip_keeps_school_qty(client: AsyncClient, admin_headers: dict[str, str]):
+    """IP를 지워도 학교 수량은 남은 IP로 넘어간다."""
+    suffix = uuid.uuid4().hex[:8]
+    school_id = (
+        await client.post(
+            "/admin/schools",
+            headers=admin_headers,
+            json={"name": f"SDL수량학교{suffix}", "biz_no": f"334-33-{suffix[:5]}"},
+        )
+    ).json()["id"]
+
+    old = await client.post(
+        "/admin/sdl",
+        headers=admin_headers,
+        json={"school_id": school_id, "registered_ip": "10.9.8.7", "purchase_qty": 7},
+    )
+    new = await client.post(
+        "/admin/sdl",
+        headers=admin_headers,
+        json={"school_id": school_id, "registered_ip": "10.9.8.8"},
+    )
+    assert new.json()["purchase_qty"] == 0
+
+    removed = await client.delete(f"/admin/sdl/{old.json()['id']}", headers=admin_headers)
+    assert removed.status_code == 204
+
+    grouped = await client.get(
+        "/admin/sdl/grouped", params={"q": f"SDL수량학교{suffix}"}, headers=admin_headers
+    )
+    item = grouped.json()["items"][0]
+    assert [ip["ip"] for ip in item["ips"]] == ["10.9.8.8"]
+    assert item["total_qty"] == 7
